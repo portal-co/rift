@@ -10,9 +10,9 @@ checksum = "e16d2d3311acee920a9eb8d33b8cbc1787ce4a264e85f964c2404b969bdcd487"
 
 [[package]]
 name = "arena-traits"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89940692593628b7642837fcd6e496ed76866c22467c75eaecea0b94c134501e"
+checksum = "294252f426d5a6c175bcacfabf794c7e16790ccc7e0721eaddee0cc946323492"
 
 [[package]]
 name = "array-init"
@@ -355,9 +355,8 @@ dependencies = [
 
 [[package]]
 name = "portal-pc-waffle"
-version = "0.5.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f42e2ec0452790e9deb4fca943478d78c9d002ab92a66391b9899df1673992a7"
+version = "0.5.5"
+source = "git+https://github.com/portal-co/waffle-.git?branch=portal#0f4ee85794bf3c45eb845d73c4e2dfdc935eebca"
 dependencies = [
  "anyhow",
  "arena-traits",
@@ -419,8 +418,7 @@ checksum = "f9d441c3b2ebf55cebf796bfdc265d67fa09db17b7bb6bd4be75c509e1e8fec3"
 [[package]]
 name = "rv-asm"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5713b6e431d860b0c0a95e410df4a859c3579db2b6e98470ae9e69658da59a38"
+source = "git+https://github.com/portal-co/rv-utils.git?branch=main#28aa94c48c3d52819866d425ea9285035cf47d47"
 
 [[package]]
 name = "serde"

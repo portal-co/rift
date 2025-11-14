@@ -1,6 +1,5 @@
 #![no_std]
 extern crate alloc;
-
 use alloc::format;
 use alloc::vec::Vec;
 use alloc::{boxed::Box, vec};
@@ -10,9 +9,9 @@ use core::{
     ops::Not,
     u64,
 };
+use portal_pc_waffle::SignatureData;
 use rv_asm::{Inst, Reg};
 // use std::env::consts::FAMILY;
-
 // use crate::{Regs, Tunables, Utils};
 // use enum_map::Enum;
 use itertools::Itertools;
@@ -71,7 +70,6 @@ pub struct Tunables {
     pub n: usize,
     pub bleed: usize,
 }
-
 impl Tunables {
     pub fn paged_chunks<T: Clone>(
         &self,
@@ -104,7 +102,6 @@ impl Tunables {
         })
     }
 }
-
 #[derive(Clone, Copy)]
 struct RiscVContext {
     block: Block,
@@ -124,7 +121,6 @@ fn compile_one(
     r: &mut Regs,
     ctx: RiscVContext,
     i: Inst,
-
     // &Utils,
     instrs: &[(u64, u32, BlockTarget)],
     input: InputRef<'_>,
@@ -162,6 +158,31 @@ fn compile_one(
                     );
                     return;
                 }
+            }
+        };
+    }
+    macro_rules! wcond_branch {
+        ($cond:expr => $e:expr) => {
+            match $cond {
+                cond => match $e {
+                    target => {
+                        f.set_terminator(
+                            ctx.block,
+                            portal_pc_waffle::Terminator::CondBr {
+                                if_false: BlockTarget {
+                                    block: f.entry,
+                                    args: r.to_args().into_iter().chain([target]).collect(),
+                                },
+                                if_true: BlockTarget {
+                                    block: ctx.rbs[4098],
+                                    args: r.to_args().into_iter().chain([ctx.pc_value]).collect(),
+                                },
+                                cond: cond,
+                            },
+                        );
+                        return;
+                    }
+                },
             }
         };
     }
@@ -329,7 +350,6 @@ fn compile_one(
                         r.put(dest,val);
                         fallthrough!()
                     }
-
                      Inst::[<$r5 iW>]{dest,src1,imm} => {
                         let [src1] = [src1].map(|b|r.get(f,ctx.block,b)).map(|b|{
                             f.add_op(ctx.block,Operator::I32WrapI64,&[b],&[Type::I32])
@@ -356,7 +376,7 @@ fn compile_one(
                     let [src1] = [src1].map(|b|r.get(f,ctx.block,b));
                     let offset = f.add_op(ctx.block,Operator::I64Const{value: offset.as_i64() as u64},&[],&[Type::I64]);
                     let src1 = f.add_op(ctx.block,Operator::I64Add,&[src1,offset],&[Type::I64]);
-                    let src1 = ctx.opts.map(f, ctx.block, src1, &mut r.user);
+                    let src1 = ctx.opts.map(module,f, ctx.block, src1, &mut r.user);
                     let val = f.add_op(ctx.block,Operator::[<I64Load $v $wasm>]{memory:MemoryArg{offset:0,align:u32::trailing_zeros(v)-3,memory}},&[src1],&[Type::I64]);
                        r.put(dest,val);
                         fallthrough!()
@@ -377,7 +397,7 @@ fn compile_one(
                     let [src1,src2] = [src1,src2].map(|b|r.get(f,ctx.block,b));
                     let offset = f.add_op(ctx.block,Operator::I64Const{value: offset.as_i64() as u64},&[],&[Type::I64]);
                     let src1 = f.add_op(ctx.block,Operator::I64Add,&[src1,offset],&[Type::I64]);
-                    let src1 = ctx.opts.map(f, ctx.block, src1, &mut r.user);
+                    let src1 = ctx.opts.map(module,f, ctx.block, src1, &mut r.user);
                     f.add_op(ctx.block,Operator::[<I64Store $v>]{memory:MemoryArg{offset:0,align:u32::trailing_zeros(v)-3,memory}},&[src1,src2],&[Type::I64]);
                     //    r.put(dest,val);
                         fallthrough!()
@@ -431,7 +451,7 @@ fn compile_one(
                         let [src1] = [src1].map(|b|r.get(f,ctx.block,b));
                         let offset = f.add_op(ctx.block,Operator::I64Const{value: offset.as_i64() as u64},&[],&[Type::I64]);
                         let src1 = f.add_op(ctx.block,Operator::I64Add,&[src1,offset],&[Type::I64]);
-                        let src1 = ctx.opts.map(f, ctx.block, src1, &mut r.user);
+                        let src1 = ctx.opts.map(module,f, ctx.block, src1, &mut r.user);
                         let val = f.add_op(ctx.block,Operator::I64Load{memory:MemoryArg{offset:0,align:3,memory}},&[src1],&[Type::I64]);
                         r.put(dest,val);
                         fallthrough!()
@@ -443,7 +463,7 @@ fn compile_one(
                             let [src1,src2] = [src1,src2].map(|b|r.get(f,ctx.block,b));
                             let offset = f.add_op(ctx.block,Operator::I64Const{value: offset.as_i64() as u64},&[],&[Type::I64]);
                             let src1 = f.add_op(ctx.block,Operator::I64Add,&[src1,offset],&[Type::I64]);
-                            let src1 = ctx.opts.map(f, ctx.block, src1, &mut r.user);
+                            let src1 = ctx.opts.map(module,f, ctx.block, src1, &mut r.user);
                             f.add_op(ctx.block,Operator::I64Store{memory:MemoryArg{offset:0,align:3,memory}},&[src1,src2],&[Type::I64]);
                             //    r.put(dest,val);
                             fallthrough!()
@@ -452,20 +472,42 @@ fn compile_one(
                             fallthrough!()
                         },
                         Inst::Ecall => {
-                            let stash = 'a: {
-                                for (i,v) in module.tables[ctx.opts.table].func_elements.as_mut().unwrap().iter_mut().enumerate(){
-                                    if *v == root{
-                                        break 'a i;
+                            if ctx.opts.inline_ecall{
+                                let SignatureData::Func { params, returns, shared } = &module.signatures[module.funcs[ctx.opts.ecall].sig()] else{
+                                    unreachable!()
+                                };
+                                let x = f.add_op(ctx.block,Operator::Call { function_index: ctx.opts.ecall },&r.to_args().chain([ctx.pc_value]).collect_vec(),&returns);
+                                let mut x = results_ref_2(f, x).into_iter();
+                                *r = Regs::from_args(&r.user, &mut x).unwrap();
+                                match x.next(){
+                                    None => {
+                                        fallthrough!()
+                                    },
+                                    Some(v) => match x.next(){
+                                        Some(w) => {
+                                        // let w = f.add_op(ctx.block, Operator::I64Eqz, &[v], &[Type::I32]);
+                                            wcond_branch!(w => v);
+                                        }, None => {
+                                            branch!(v);
+                                        }
                                     }
                                 }
-                                let t = module.tables[ctx.opts.table].func_elements.as_mut().unwrap();
-                                let i = t.len();
-                                t.push(root);
-                                break 'a i;
-                            };
-                            let stash = stash as u64;
-                            let stash = f.add_op(ctx.block, Operator::I64Const { value: stash }, &[], &[Type::I64]);
-                            f.set_terminator(ctx.block, portal_pc_waffle::Terminator::ReturnCall { func: ctx.opts.ecall, args: [stash].into_iter().chain(r.to_args()).chain([ctx.pc_value]).collect() });
+                            }else{
+                                let stash = 'a: {
+                                    for (i,v) in module.tables[ctx.opts.table].func_elements.as_mut().unwrap().iter_mut().enumerate(){
+                                        if *v == root{
+                                            break 'a i;
+                                        }
+                                    }
+                                    let t = module.tables[ctx.opts.table].func_elements.as_mut().unwrap();
+                                    let i = t.len();
+                                    t.push(root);
+                                    break 'a i;
+                                };
+                                let stash = stash as u64;
+                                let stash = f.add_op(ctx.block, Operator::I64Const { value: stash }, &[], &[Type::I64]);
+                                f.set_terminator(ctx.block, portal_pc_waffle::Terminator::ReturnCall { func: ctx.opts.ecall, args: [stash].into_iter().chain(r.to_args()).chain([ctx.pc_value]).collect() });
+                            }
                         },
                         _ => todo!()
                     }),
@@ -481,9 +523,17 @@ pub struct Opts {
     pub table: Table,
     pub ecall: Func,
     pub mapper: Option<(Func, Type)>,
+    pub inline_ecall: bool,
 }
 impl Opts {
-    fn map(&self, f: &mut FunctionBody, block: Block, v: Value, user: &mut [Value]) -> Value {
+    fn map(
+        &self,
+        module: &Module,
+        f: &mut FunctionBody,
+        block: Block,
+        v: Value,
+        user: &mut [Value],
+    ) -> Value {
         match self.mapper.as_ref().cloned() {
             None => v,
             Some((a, b)) => {
@@ -491,7 +541,14 @@ impl Opts {
                     block,
                     Operator::Call { function_index: a },
                     &user.iter().cloned().chain([v]).collect_vec(),
-                    &[b],
+                    match &module.signatures[module.funcs[a].sig()] {
+                        SignatureData::Func {
+                            params,
+                            returns,
+                            shared,
+                        } => &*returns,
+                        _ => unreachable!(),
+                    },
                 );
                 let o = results_ref_2(f, o);
                 if o.len() != user.len() + 1 {
@@ -571,7 +628,6 @@ pub fn compile(
             .map(|(h, i)| {
                 (h, i, {
                     let k = f.add_block();
-
                     BlockTarget {
                         block: k,
                         args: base
