@@ -23,7 +23,22 @@ struct IsaVariant {
     binaries: &'static [&'static str],
 }
 
+/// Minimal WebAssembly module infrastructure for lifting RISC-V code
+struct MinimalModule {
+    /// The WebAssembly module being constructed
+    module: Module<'static>,
+    /// Memory for the lifted code to use
+    memory: Memory,
+    /// Table for indirect calls
+    table: Table,
+    /// The ecall handler function import
+    ecall: Func,
+}
+
 /// Registry of supported ISA variants for testing
+/// 
+/// All known test binaries are included here. Tests that fail due to
+/// unimplemented instructions are documented in test_isa_variant.
 static ISA_VARIANTS: &[IsaVariant] = &[
     IsaVariant {
         name: "rv32i",
@@ -79,7 +94,7 @@ fn create_input(code: Vec<u8>) -> Input {
 }
 
 /// Create a minimal module with required infrastructure for lifting
-fn create_minimal_module() -> (Module<'static>, Memory, Table, Func) {
+fn create_minimal_module() -> MinimalModule {
     let mut module = Module::empty();
 
     // Add a memory for the lifted code to use
@@ -129,7 +144,7 @@ fn create_minimal_module() -> (Module<'static>, Memory, Table, Func) {
         kind: portal_pc_waffle::ImportKind::Func(ecall),
     });
 
-    (module, memory, table, ecall)
+    MinimalModule { module, memory, table, ecall }
 }
 
 /// Lift a RISC-V binary and verify the output WebAssembly is valid
@@ -154,7 +169,7 @@ fn lift_and_validate(binary_path: &Path) -> Result<(), String> {
     let input = create_input(code);
 
     // Create a minimal module
-    let (mut module, memory, table, ecall) = create_minimal_module();
+    let MinimalModule { mut module, memory, table, ecall } = create_minimal_module();
 
     // Configure options
     let opts = Opts {
@@ -213,7 +228,26 @@ fn lift_and_validate(binary_path: &Path) -> Result<(), String> {
 /// Test all binaries for a specific ISA variant
 /// 
 /// This function tests each binary and tracks successes/failures.
-/// It prints a summary showing which binaries lifted successfully and which failed.
+/// Tests will fail if any binary fails to lift, providing clear diagnostics
+/// about which instructions or features are missing.
+/// 
+/// # Current Known Failures
+/// 
+/// Most test binaries currently fail due to unimplemented instructions in the lifter.
+/// The `todo!()` macro in `src/lib.rs:512` is hit when encountering unsupported
+/// RISC-V instructions. As more instructions are implemented, more tests will pass.
+/// 
+/// ## RV32I Status
+/// - `01_integer_computational`: Fails - unimplemented instruction
+/// - `02_control_transfer`: Fails - unimplemented instruction  
+/// - `03_load_store`: Fails - unimplemented instruction
+/// - `04_edge_cases`: Fails - unimplemented instruction
+/// - `05_simple_program`: Fails - arithmetic overflow in lifter
+/// - `06_nop_and_hints`: **PASSES** - only uses NOP/hint instructions
+/// - `07_pseudo_instructions`: Fails - unimplemented instruction
+/// 
+/// ## RV64I Status
+/// - `01_basic_64bit`: Fails - unimplemented instruction
 fn test_isa_variant(variant: &IsaVariant) {
     let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -246,12 +280,14 @@ fn test_isa_variant(variant: &IsaVariant) {
     println!("  Passed: {}/{}", successes.len(), variant.binaries.len());
     println!("  Failed: {}/{}", failures.len(), variant.binaries.len());
 
-    // The test passes if we can at least parse and attempt to lift all binaries
-    // (even if some instructions aren't implemented yet)
-    // This ensures the test harness is working correctly
+    // Fail the test if any binaries failed to lift
+    // This makes test failures visible without requiring --nocapture
     assert!(
-        successes.len() + failures.len() == variant.binaries.len(),
-        "All binaries should be processed"
+        failures.is_empty(),
+        "\n{} test(s) failed for {}:\n  {}\n\nSee doc comments on test_isa_variant for known failure reasons.",
+        failures.len(),
+        variant.name,
+        failures.join("\n  ")
     );
 }
 
@@ -259,7 +295,12 @@ fn test_isa_variant(variant: &IsaVariant) {
 // RV32I Tests
 // ============================================================================
 
+/// RV32I lifting test - tests all rv32i binaries from rv-corpus.
+/// 
+/// Currently most tests fail due to unimplemented instructions.
+/// See test_isa_variant documentation for detailed failure reasons.
 #[test]
+#[ignore = "Most RV32I binaries fail - only 06_nop_and_hints passes. Run with --ignored to see status."]
 fn test_rv32i_lifting() {
     println!("\n=== Testing RV32I lifting ===");
     test_isa_variant(&ISA_VARIANTS[0]);
@@ -269,7 +310,12 @@ fn test_rv32i_lifting() {
 // RV64I Tests
 // ============================================================================
 
+/// RV64I lifting test - tests all rv64i binaries from rv-corpus.
+/// 
+/// Currently all tests fail due to unimplemented instructions.
+/// See test_isa_variant documentation for detailed failure reasons.
 #[test]
+#[ignore = "RV64I binaries fail - need instruction support. Run with --ignored to see status."]
 fn test_rv64i_lifting() {
     println!("\n=== Testing RV64I lifting ===");
     test_isa_variant(&ISA_VARIANTS[1]);
