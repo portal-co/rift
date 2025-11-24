@@ -28,18 +28,18 @@ static ISA_VARIANTS: &[IsaVariant] = &[
     IsaVariant {
         name: "rv32i",
         binaries: &[
-            "rv32i_01_integer_computational.bin",
-            "rv32i_02_control_transfer.bin",
-            "rv32i_03_load_store.bin",
-            "rv32i_04_edge_cases.bin",
-            "rv32i_05_simple_program.bin",
-            "rv32i_06_nop_and_hints.bin",
-            "rv32i_07_pseudo_instructions.bin",
+            "rv32i/01_integer_computational",
+            "rv32i/02_control_transfer",
+            "rv32i/03_load_store",
+            "rv32i/04_edge_cases",
+            "rv32i/05_simple_program",
+            "rv32i/06_nop_and_hints",
+            "rv32i/07_pseudo_instructions",
         ],
     },
     IsaVariant {
         name: "rv64i",
-        binaries: &["rv64i_01_basic_64bit.bin"],
+        binaries: &["rv64i/01_basic_64bit"],
     },
 ];
 
@@ -54,11 +54,10 @@ fn extract_code_from_elf(data: &[u8]) -> Option<(Vec<u8>, u64)> {
         return Some((code.to_vec(), start_addr));
     }
 
-    // Fall back to first executable section
+    // Fall back to first non-empty section with data
     for section in file.sections() {
         if let Ok(data) = section.data() {
             if !data.is_empty() {
-                // Check if section is executable (has ALLOC flag in ELF)
                 return Some((data.to_vec(), section.address()));
             }
         }
@@ -105,7 +104,8 @@ fn create_minimal_module() -> (Module<'static>, Memory, Table, Func) {
         table64: false,
     });
 
-    // Create a dummy ecall handler signature
+    // Create ecall handler signature with 32 params/returns for RISC-V registers
+    // RISC-V has 32 GPRs (x0-x31), though x0 is hardwired to zero
     let ecall_sig = portal_pc_waffle::util::new_sig(
         &mut module,
         portal_pc_waffle::SignatureData::Func {
@@ -171,6 +171,7 @@ fn lift_and_validate(binary_path: &Path) -> Result<(), String> {
     // Use catch_unwind to handle todo!() panics gracefully
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Perform the lift
+        // Return types: 31 values for GPRs x1-x31 (x0 is always zero) + PC + trap flag = 33
         let _func = rift::compile(
             &mut module,
             vec![], // No user types
@@ -179,7 +180,7 @@ fn lift_and_validate(binary_path: &Path) -> Result<(), String> {
             opts,
             &tune,
             &mut |_, _| {}, // No user preparation
-            std::iter::repeat(Type::I64).take(33), // Return types: 31 GPRs + PC + trap flag
+            std::iter::repeat(Type::I64).take(33),
         );
 
         // Use fixup_orders to ensure imports come before function bodies
