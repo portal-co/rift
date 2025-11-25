@@ -509,7 +509,7 @@ fn compile_one(
                                 f.set_terminator(ctx.block, portal_pc_waffle::Terminator::ReturnCall { func: ctx.opts.ecall, args: [stash].into_iter().chain(r.to_args()).chain([ctx.pc_value]).collect() });
                             }
                         },
-                        _ => todo!()
+                        a => todo!("unhandled op: {a:?}")
                     }),
                 })
             })
