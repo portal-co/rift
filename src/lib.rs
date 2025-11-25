@@ -86,7 +86,7 @@ impl Tunables {
                 .flat_map(|j| pages.get(i.wrapping_sub(j + 1)))
                 .flat_map(|a| a.iter())
                 .skip(if i * n > bleed {
-                    (bleed / n * n) - bleed
+                    (bleed / (i * n)).saturating_sub(bleed)
                 } else {
                     0usize
                 })
@@ -509,7 +509,10 @@ fn compile_one(
                                 f.set_terminator(ctx.block, portal_pc_waffle::Terminator::ReturnCall { func: ctx.opts.ecall, args: [stash].into_iter().chain(r.to_args()).chain([ctx.pc_value]).collect() });
                             }
                         },
-                        a => todo!("unhandled op: {a:?}")
+                        // a => todo!("unhandled op: {a:?}")
+                        a => {
+                            f.set_terminator(ctx.block,portal_pc_waffle::Terminator::UB);
+                        }
                     }),
                 })
             })

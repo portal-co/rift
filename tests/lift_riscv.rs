@@ -300,7 +300,6 @@ fn test_isa_variant(variant: &IsaVariant) {
 /// Currently most tests fail due to unimplemented instructions.
 /// See test_isa_variant documentation for detailed failure reasons.
 #[test]
-#[ignore = "Most RV32I binaries fail - only 06_nop_and_hints passes. Run with --ignored to see status."]
 fn test_rv32i_lifting() {
     println!("\n=== Testing RV32I lifting ===");
     test_isa_variant(&ISA_VARIANTS[0]);
@@ -315,7 +314,6 @@ fn test_rv32i_lifting() {
 /// Currently all tests fail due to unimplemented instructions.
 /// See test_isa_variant documentation for detailed failure reasons.
 #[test]
-#[ignore = "RV64I binaries fail - need instruction support. Run with --ignored to see status."]
 fn test_rv64i_lifting() {
     println!("\n=== Testing RV64I lifting ===");
     test_isa_variant(&ISA_VARIANTS[1]);
