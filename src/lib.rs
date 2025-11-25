@@ -511,7 +511,14 @@ fn compile_one(
                         },
                         // a => todo!("unhandled op: {a:?}")
                         a => {
-                            f.set_terminator(ctx.block,portal_pc_waffle::Terminator::UB);
+                            let rv = f.add_op(ctx.block, Operator::I32Const { value: 1 }, &[], &[Type::I32]);
+                            f.set_terminator(
+                                ctx.block,
+                                portal_pc_waffle::Terminator::Return {
+                                    values: r.to_args().chain([ctx.pc_value]).chain(once(rv)).collect(),
+                                },
+                            );
+              
                         }
                     }),
                 })
