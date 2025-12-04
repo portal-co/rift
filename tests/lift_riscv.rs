@@ -572,3 +572,86 @@ fn test_scan_all_hints() {
     // The 06_nop_and_hints.s file has both NOPs and HINT instructions
     assert!(nops > 0, "Should find NOPs in nop_and_hints test");
 }
+
+/// Test compile_with_hints callback is invoked for HINT instructions
+#[test]
+fn test_compile_with_hints_callback() {
+    let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures");
+    
+    let binary_path = fixtures_dir.join("rv32i/01_integer_computational");
+    
+    if !binary_path.exists() {
+        println!("Skipping test: binary not found (submodule not initialized?)");
+        return;
+    }
+    
+    let data = std::fs::read(&binary_path).expect("Failed to read binary");
+    let (code, start_addr) = extract_code_from_elf(&data).expect("Failed to extract code");
+    
+    // Create the input structure
+    let input = create_input(code);
+    
+    // Create a minimal module
+    let MinimalModule { mut module, memory, table, ecall } = create_minimal_module();
+    
+    // Configure options with HINT processing enabled
+    let opts = Opts {
+        mem: memory,
+        table,
+        ecall,
+        mapper: None,
+        inline_ecall: true,
+        process_hints: true, // Enable HINT processing
+    };
+    
+    // Configure tuning parameters
+    let tune = Tunables { n: 256, bleed: 64 };
+    
+    // Collect HINTs via callback
+    let mut collected_hints: Vec<rift::HintInfo> = Vec::new();
+    
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _func = rift::compile_with_hints(
+            &mut module,
+            vec![], // No user types
+            input.as_ref(),
+            start_addr,
+            opts,
+            &tune,
+            &mut |_, _| {}, // No user preparation
+            std::iter::repeat(Type::I64).take(33),
+            &mut |ctx| {
+                // Callback is invoked for each HINT
+                collected_hints.push(ctx.hint.clone());
+            },
+        );
+    }));
+    
+    match result {
+        Ok(()) => {
+            // Verify that the callback collected the expected HINTs
+            assert!(!collected_hints.is_empty(), "Should collect HINT markers via callback");
+            
+            // The 01_integer_computational.s file has HINT markers 1-14
+            assert_eq!(collected_hints.len(), 14, 
+                "Expected 14 HINT markers, found {}", collected_hints.len());
+            
+            // Verify marker values are in expected range
+            for hint in &collected_hints {
+                assert!(hint.marker >= 1 && hint.marker <= 14,
+                    "Marker {} should be between 1 and 14", hint.marker);
+            }
+            
+            // Verify we got markers 1-14 (in any order due to compilation order)
+            let mut markers: Vec<i32> = collected_hints.iter().map(|h| h.marker).collect();
+            markers.sort();
+            let expected: Vec<i32> = (1..=14).collect();
+            assert_eq!(markers, expected, "Should have markers 1-14");
+        }
+        Err(e) => {
+            panic!("compile_with_hints should not panic: {:?}", e);
+        }
+    }
+}

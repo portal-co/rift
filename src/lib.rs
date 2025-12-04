@@ -37,6 +37,50 @@ pub struct HintInfo {
     pub pc: u64,
 }
 
+/// Context passed to the HINT callback during inline processing.
+///
+/// This structure provides access to the current compilation state when a HINT
+/// instruction is encountered, allowing the callback to inspect or modify the
+/// generated WebAssembly code.
+pub struct HintCallbackContext<'a, 'b> {
+    /// The HINT information (marker value and PC)
+    pub hint: HintInfo,
+    /// The decoded HINT instruction
+    pub instruction: &'a Inst,
+    /// The WebAssembly module being constructed
+    pub module: &'a mut Module<'b>,
+    /// The current function body being built
+    pub function: &'a mut FunctionBody,
+    /// The current block where the HINT was encountered
+    pub block: Block,
+    /// The current register state
+    pub regs: &'a mut Regs,
+    /// The PC value as a WebAssembly Value
+    pub pc_value: Value,
+}
+
+/// Type alias for the HINT callback function.
+///
+/// The callback is invoked for each HINT instruction encountered during
+/// compilation when `Opts::process_hints` is enabled and a callback is provided.
+///
+/// The callback receives a `HintCallbackContext` which provides access to:
+/// - The HINT marker value and PC
+/// - The decoded instruction
+/// - The WebAssembly module and function being built
+/// - The current block and register state
+///
+/// # Example
+///
+/// ```ignore
+/// let mut hints_found = Vec::new();
+/// let hint_callback = |ctx: &mut HintCallbackContext| {
+///     hints_found.push(ctx.hint.clone());
+///     // Optionally add WebAssembly instructions here
+/// };
+/// ```
+pub type HintCallback<'a, 'b, 'c> = &'a mut dyn FnMut(&mut HintCallbackContext<'b, 'c>);
+
 /// Checks if an instruction is a HINT instruction.
 ///
 /// According to the RISC-V specification (Section 2.9):
@@ -662,22 +706,25 @@ impl Opts {
         }
     }
 }
-pub fn compile(
-    m: &mut Module,
+
+/// Internal helper function for compiling RISC-V code with optional HINT callback.
+///
+/// This function contains the shared implementation used by both `compile` and
+/// `compile_with_hints`. The `hint_callback` parameter is `Option` - when `None`,
+/// HINT processing is skipped even if `opts.process_hints` is true.
+fn compile_internal<'a>(
+    m: &mut Module<'a>,
     user: Vec<Type>,
     code: InputRef<'_>,
     start: u64,
     opts: Opts,
-    // etab: Table,
     tune: &Tunables,
-    // mut decode: impl FnMut(u32) -> Option<I>,
-    mut user_prepa: &mut (dyn FnMut(&mut Regs, &mut Value) + '_),
-    // memory: Memory,
+    user_prepa: &mut (dyn FnMut(&mut Regs, &mut Value) + '_),
     retty: impl Iterator<Item = Type>,
-    // utils: &Utils,
+    mut hint_callback: Option<&mut dyn FnMut(&mut HintCallbackContext<'_, 'a>)>,
 ) -> Func {
     let n = tune.n;
-    let bleed = tune.bleed;
+    let _bleed = tune.bleed;
     let base = user.iter().cloned().chain([Type::I64; 31]);
     let mut code_fns: Vec<Func> = vec![];
     let j_sig = new_sig(
@@ -697,29 +744,8 @@ pub fn compile(
         .windows(4)
         .enumerate()
         .filter_map(|(i, j)| Some((i as u64 + start, u32::from_le_bytes(j.try_into().ok()?))));
-    // let pages = pages.into_iter().map(|a| a.collect_vec()).collect_vec();
-    for (i, page) in tune.paged_chunks(pages).enumerate() {
-        // let mut page = pages
-        //     .get(i.wrapping_sub(1))
-        //     .into_iter()
-        //     .flat_map(|a| a.iter())
-        //     .skip(n - bleed)
-        // let mut page = (0..=(bleed / n))
-        //     .rev()
-        //     .flat_map(|j| pages.get(i.wrapping_sub(j + 1)))
-        //     .flat_map(|a| a.iter())
-        //     .skip(if i * n > bleed {
-        //         (bleed / n * n) - bleed
-        //     } else {
-        //         0usize
-        //     })
-        //     .chain(page.iter())
-        //     .chain(
-        //         (0..=(bleed / n))
-        //             .flat_map(|j| pages.get(i + j + 1).into_iter().flat_map(|a| a.iter()))
-        //             .take(bleed),
-        //     )
-        //     .cloned();
+    
+    for (_i, page) in tune.paged_chunks(pages).enumerate() {
         let mut f = FunctionBody::new(&m, f_sig);
         let mut page = page.peekable();
         let Some((this_start, _)) = page.peek().cloned() else {
@@ -755,7 +781,7 @@ pub fn compile(
             &[Type::I64],
         );
         let jt_this_page = f.add_op(f.entry, Operator::I64Sub, &[jt, jt_this_page], &[Type::I64]);
-        let jt_root = f.add_op(f.entry, Operator::I64Sub, &[jt, jt_root], &[Type::I64]);
+        let _jt_root = f.add_op(f.entry, Operator::I64Sub, &[jt, jt_root], &[Type::I64]);
         let s = f.add_block();
         let fail = f.add_block();
         f.set_terminator(fail, portal_pc_waffle::Terminator::UB);
@@ -794,8 +820,8 @@ pub fn compile(
             },
         );
         for (ri, (h, i, BlockTarget { block, mut args })) in instrs.iter().cloned().enumerate() {
-            let mut rpc = args.pop().unwrap();
-            let Some(i) = Inst::decode_normal(i, rv_asm::Xlen::Rv64).ok() else {
+            let rpc = args.pop().unwrap();
+            let Some(inst) = Inst::decode_normal(i, rv_asm::Xlen::Rv64).ok() else {
                 let r = f.add_op(block, Operator::I32Const { value: 1 }, &[], &[Type::I32]);
                 f.set_terminator(
                     block,
@@ -820,36 +846,50 @@ pub fn compile(
                     block
                 }
             });
-            let mut args = args.drain(..);
+            let mut args_iter = args.drain(..);
             let mut uregs = Regs {
-                user: user.iter().filter_map(|x| args.next()).collect(),
-                gpr: args.next_array().unwrap(),
+                user: user.iter().filter_map(|_x| args_iter.next()).collect(),
+                gpr: args_iter.next_array().unwrap(),
             };
+            
+            // Check for HINT instruction and invoke callback if enabled
+            if let Some(ref mut callback) = hint_callback {
+                if opts.process_hints {
+                    if let Some(marker) = detect_hint(&inst) {
+                        let hint_info = HintInfo { marker, pc: h };
+                        let mut ctx = HintCallbackContext {
+                            hint: hint_info,
+                            instruction: &inst,
+                            module: m,
+                            function: &mut f,
+                            block,
+                            regs: &mut uregs,
+                            pc_value: rpc,
+                        };
+                        callback(&mut ctx);
+                    }
+                }
+            }
+            
             let orpc = rpc;
             let x = f.add_op(block, Operator::I64Const { value: 4 }, &[], &[Type::I64]);
-            let mut rpc = f.add_op(block, Operator::I64Add, &[rpc, x], &[Type::I64]);
+            let rpc = f.add_op(block, Operator::I64Add, &[rpc, x], &[Type::I64]);
             compile_one(
                 m,
                 &mut f,
                 &mut uregs,
                 RiscVContext {
                     block,
-                    // mem,
                     rbs,
                     pc_value: rpc,
                     original_pc_value: orpc,
                     pc: h,
                     local_instruction_index: ri,
                     opts,
-                    // ecall,
-                    // table,
-                    // etab,
                 },
-                i,
-                // utils,
+                inst,
                 &instrs,
                 code.nest(),
-                // memory,
                 j,
             );
         }
@@ -860,6 +900,7 @@ pub fn compile(
         ));
         code_fns.push(f);
     }
+    
     let ti = m.tables[opts.table].func_elements.as_mut().unwrap().len() as u64;
     m.tables[opts.table]
         .func_elements
@@ -890,7 +931,7 @@ pub fn compile(
         let mut args = args.clone();
         let mut args = args.drain(..);
         let mut uregs = Regs {
-            user: user.iter().filter_map(|x| args.next()).collect(),
+            user: user.iter().filter_map(|_x| args.next()).collect(),
             gpr: args.next_array().unwrap(),
         };
         let mut rpc = jt;
@@ -925,6 +966,82 @@ pub fn compile(
     );
     m.funcs[j] = FuncDecl::Body(j_sig, format!("r5_jmp"), f);
     return j;
+}
+
+/// Compile RISC-V code to WebAssembly.
+///
+/// This function compiles RISC-V binary code into WebAssembly, creating the
+/// necessary function bodies and table entries for execution.
+///
+/// For HINT instruction processing during compilation, use [`compile_with_hints`]
+/// instead.
+pub fn compile(
+    m: &mut Module,
+    user: Vec<Type>,
+    code: InputRef<'_>,
+    start: u64,
+    opts: Opts,
+    tune: &Tunables,
+    user_prepa: &mut (dyn FnMut(&mut Regs, &mut Value) + '_),
+    retty: impl Iterator<Item = Type>,
+) -> Func {
+    compile_internal(m, user, code, start, opts, tune, user_prepa, retty, None)
+}
+
+/// Compile RISC-V code to WebAssembly with inline HINT processing.
+///
+/// This is an extended version of [`compile`] that supports inline processing
+/// of HINT instructions through a callback. When `Opts::process_hints` is enabled
+/// and a HINT instruction (`addi x0, x0, N` where N != 0) is encountered, the
+/// provided callback is invoked.
+///
+/// This is useful for:
+/// - Test case boundary detection during compilation
+/// - Instrumenting generated code at HINT locations
+/// - Collecting HINT markers during compilation
+///
+/// # Arguments
+///
+/// * `m` - The WebAssembly module to add functions to
+/// * `user` - User-defined types for the function signature
+/// * `code` - The RISC-V binary code to compile
+/// * `start` - The starting address of the code
+/// * `opts` - Compilation options (including `process_hints` flag)
+/// * `tune` - Tuning parameters for compilation
+/// * `user_prepa` - User preparation callback for register/PC initialization
+/// * `retty` - Return type iterator for the compiled function
+/// * `hint_callback` - Callback invoked for each HINT instruction when `process_hints` is true
+///
+/// # Example
+///
+/// ```ignore
+/// let mut hints_found = Vec::new();
+/// let func = compile_with_hints(
+///     &mut module,
+///     vec![],
+///     code.as_ref(),
+///     start_addr,
+///     Opts { process_hints: true, ..opts },
+///     &tune,
+///     &mut |_, _| {},
+///     std::iter::repeat(Type::I64).take(33),
+///     &mut |ctx| {
+///         hints_found.push(ctx.hint.clone());
+///     },
+/// );
+/// ```
+pub fn compile_with_hints<'a>(
+    m: &mut Module<'a>,
+    user: Vec<Type>,
+    code: InputRef<'_>,
+    start: u64,
+    opts: Opts,
+    tune: &Tunables,
+    user_prepa: &mut (dyn FnMut(&mut Regs, &mut Value) + '_),
+    retty: impl Iterator<Item = Type>,
+    hint_callback: &mut dyn FnMut(&mut HintCallbackContext<'_, 'a>),
+) -> Func {
+    compile_internal(m, user, code, start, opts, tune, user_prepa, retty, Some(hint_callback))
 }
 
 /// Scan code for HINT instructions and return a list of detected HINTs.
@@ -977,10 +1094,10 @@ pub fn scan_hints(code: &[u8], start: u64, xlen: rv_asm::Xlen) -> Vec<HintInfo> 
 ///
 /// # Returns
 ///
-/// A vector of tuples containing (pc, instruction, is_marker) where:
+/// A vector of tuples containing (pc, instruction, marker) where:
 /// - `pc` is the address of the instruction
 /// - `instruction` is the decoded `Inst`
-/// - `is_marker` is `Some(marker)` if this is a test case marker, `None` otherwise
+/// - `marker` is `Some(marker_value)` if this is a test case marker, `None` otherwise
 pub fn scan_all_hints(
     code: &[u8],
     start: u64,
