@@ -70,6 +70,11 @@ pub struct HintCallbackContext<'a, 'b> {
 /// - The WebAssembly module and function being built
 /// - The current block and register state
 ///
+/// The lifetime parameters ensure that:
+/// - `'a` is the lifetime of the callback reference itself
+/// - `'b` is the lifetime bound on the callback trait object
+/// - The context's inner lifetimes (`'_`, `'_`) are anonymous to prevent data leakage
+///
 /// # Example
 ///
 /// ```ignore
@@ -79,7 +84,7 @@ pub struct HintCallbackContext<'a, 'b> {
 ///     // Optionally add WebAssembly instructions here
 /// };
 /// ```
-pub type HintCallback<'a, 'b, 'c> = &'a mut dyn FnMut(&mut HintCallbackContext<'b, 'c>);
+pub type HintCallback<'a, 'b> = &'a mut (dyn FnMut(&mut HintCallbackContext<'_, '_>) + 'b);
 
 /// Checks if an instruction is a HINT instruction.
 ///
@@ -712,8 +717,8 @@ impl Opts {
 /// This function contains the shared implementation used by both `compile` and
 /// `compile_with_hints`. The `hint_callback` parameter is `Option` - when `None`,
 /// HINT processing is skipped even if `opts.process_hints` is true.
-fn compile_internal<'a>(
-    m: &mut Module<'a>,
+fn compile_internal(
+    m: &mut Module<'_>,
     user: Vec<Type>,
     code: InputRef<'_>,
     start: u64,
@@ -721,7 +726,7 @@ fn compile_internal<'a>(
     tune: &Tunables,
     user_prepa: &mut (dyn FnMut(&mut Regs, &mut Value) + '_),
     retty: impl Iterator<Item = Type>,
-    mut hint_callback: Option<&mut dyn FnMut(&mut HintCallbackContext<'_, 'a>)>,
+    mut hint_callback: Option<&mut (dyn FnMut(&mut HintCallbackContext<'_, '_>) + '_)>,
 ) -> Func {
     let n = tune.n;
     let _bleed = tune.bleed;
@@ -1030,8 +1035,8 @@ pub fn compile(
 ///     },
 /// );
 /// ```
-pub fn compile_with_hints<'a>(
-    m: &mut Module<'a>,
+pub fn compile_with_hints(
+    m: &mut Module<'_>,
     user: Vec<Type>,
     code: InputRef<'_>,
     start: u64,
@@ -1039,7 +1044,7 @@ pub fn compile_with_hints<'a>(
     tune: &Tunables,
     user_prepa: &mut (dyn FnMut(&mut Regs, &mut Value) + '_),
     retty: impl Iterator<Item = Type>,
-    hint_callback: &mut dyn FnMut(&mut HintCallbackContext<'_, 'a>),
+    hint_callback: &mut (dyn FnMut(&mut HintCallbackContext<'_, '_>) + '_),
 ) -> Func {
     compile_internal(m, user, code, start, opts, tune, user_prepa, retty, Some(hint_callback))
 }
