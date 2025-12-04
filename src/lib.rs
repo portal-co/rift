@@ -1028,11 +1028,12 @@ fn compile_one(
                         // rs1 and writes to integer register rd a 10-bit mask that indicates the
                         // class of the floating-point number."
                         // Returns a 10-bit mask (bit 0-9) indicating class
-                        Inst::FclassS { dest, src } => {
-                            // This is complex to implement properly - for now, return a simple
-                            // classification (bit 8 = positive normal)
+                        Inst::FclassS { dest, src: _ } => {
+                            // FCLASS.S is complex to implement properly in WebAssembly as it requires
+                            // distinguishing between quiet NaN, signaling NaN, infinity, zero, 
+                            // subnormal, and normal numbers with both positive and negative variants.
+                            // For now, return a placeholder value (bit 8 = positive normal).
                             // TODO: Full implementation requires checking NaN, Inf, zero, subnormal
-                            let _ = src;
                             let result = f.add_op(ctx.block, Operator::I64Const { value: 0x100 }, &[], &[Type::I64]);
                             r.put(dest, result);
                             fallthrough!()
@@ -1052,7 +1053,12 @@ fn compile_one(
                             let s1 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s1], &[Type::F32]);
                             let s2 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s2], &[Type::F32]);
                             let s3 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s3], &[Type::F32]);
-                            // WebAssembly doesn't have fused multiply-add, so we approximate
+                            // Note: WebAssembly doesn't have fused multiply-add, so we use separate
+                            // multiply and add operations. This may produce slightly different results
+                            // than a true FMA due to intermediate rounding (one rounding vs none).
+                            // RISC-V Specification Quote:
+                            // "The fused multiply-add instructions are defined to compute (rs1×rs2)+rs3
+                            // with a single rounding."
                             let mul = f.add_op(ctx.block, Operator::F32Mul, &[s1, s2], &[Type::F32]);
                             let result = f.add_op(ctx.block, Operator::F32Add, &[mul, s3], &[Type::F32]);
                             let result = f.add_op(ctx.block, Operator::F64PromoteF32, &[result], &[Type::F64]);
@@ -1332,9 +1338,9 @@ fn compile_one(
                         },
                         
                         // FCLASS.D: Floating-Point Classify Double-Precision
-                        Inst::FclassD { dest, src } => {
-                            // Simplified implementation - TODO: Full classification
-                            let _ = src;
+                        Inst::FclassD { dest, src: _ } => {
+                            // FCLASS.D is complex to implement properly in WebAssembly - see FCLASS.S comment.
+                            // TODO: Full implementation requires checking NaN, Inf, zero, subnormal
                             let result = f.add_op(ctx.block, Operator::I64Const { value: 0x100 }, &[], &[Type::I64]);
                             r.put(dest, result);
                             fallthrough!()
