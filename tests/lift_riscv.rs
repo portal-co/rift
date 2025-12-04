@@ -622,7 +622,7 @@ fn test_compile_with_hints_callback() {
             &tune,
             &mut |_, _| {}, // No user preparation
             std::iter::repeat(Type::I64).take(33),
-            &mut |ctx| {
+            &mut |ctx: &mut rift::HintCallbackContext| {
                 // Callback is invoked for each HINT
                 collected_hints.push(ctx.hint.clone());
             },

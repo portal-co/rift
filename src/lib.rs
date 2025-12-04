@@ -59,32 +59,59 @@ pub struct HintCallbackContext<'a, 'b> {
     pub pc_value: Value,
 }
 
-/// Type alias for the HINT callback function.
+/// Trait for handling HINT instructions during compilation.
 ///
-/// The callback is invoked for each HINT instruction encountered during
-/// compilation when `Opts::process_hints` is enabled and a callback is provided.
+/// This trait is invoked for each HINT instruction encountered during
+/// compilation when `Opts::process_hints` is enabled and a handler is provided.
 ///
-/// The callback receives a `HintCallbackContext` which provides access to:
+/// The handler receives a `HintCallbackContext` which provides access to:
 /// - The HINT marker value and PC
 /// - The decoded instruction
 /// - The WebAssembly module and function being built
 /// - The current block and register state
 ///
-/// The lifetime parameters ensure that:
-/// - `'a` is the lifetime of the callback reference itself
-/// - `'b` is the lifetime bound on the callback trait object
-/// - The context's inner lifetimes (`'_`, `'_`) are anonymous to prevent data leakage
-///
 /// # Example
 ///
 /// ```ignore
-/// let mut hints_found = Vec::new();
-/// let hint_callback = |ctx: &mut HintCallbackContext| {
-///     hints_found.push(ctx.hint.clone());
-///     // Optionally add WebAssembly instructions here
-/// };
+/// struct MyHintHandler {
+///     hints_found: Vec<HintInfo>,
+/// }
+///
+/// impl HintHandler for MyHintHandler {
+///     fn on_hint(&mut self, ctx: &mut HintCallbackContext<'_, '_>) {
+///         self.hints_found.push(ctx.hint.clone());
+///     }
+/// }
 /// ```
-pub type HintCallback<'a, 'b> = &'a mut (dyn FnMut(&mut HintCallbackContext<'_, '_>) + 'b);
+pub trait HintHandler {
+    /// Called when a HINT instruction is encountered during compilation.
+    ///
+    /// The context provides mutable access to the compilation state, allowing
+    /// the handler to inspect the HINT or modify the generated WebAssembly code.
+    fn on_hint(&mut self, ctx: &mut HintCallbackContext<'_, '_>);
+}
+
+/// Blanket implementation of `HintHandler` for any `FnMut` closure.
+///
+/// This allows using closures directly as hint handlers:
+///
+/// ```ignore
+/// let mut hints_found = Vec::new();
+/// compile_with_hints(
+///     // ... other args ...
+///     &mut |ctx: &mut HintCallbackContext| {
+///         hints_found.push(ctx.hint.clone());
+///     },
+/// );
+/// ```
+impl<F> HintHandler for F
+where
+    F: FnMut(&mut HintCallbackContext<'_, '_>),
+{
+    fn on_hint(&mut self, ctx: &mut HintCallbackContext<'_, '_>) {
+        self(ctx)
+    }
+}
 
 /// Checks if an instruction is a HINT instruction.
 ///
@@ -712,10 +739,10 @@ impl Opts {
     }
 }
 
-/// Internal helper function for compiling RISC-V code with optional HINT callback.
+/// Internal helper function for compiling RISC-V code with optional HINT handler.
 ///
 /// This function contains the shared implementation used by both `compile` and
-/// `compile_with_hints`. The `hint_callback` parameter is `Option` - when `None`,
+/// `compile_with_hints`. The `hint_handler` parameter is `Option` - when `None`,
 /// HINT processing is skipped even if `opts.process_hints` is true.
 fn compile_internal(
     m: &mut Module<'_>,
@@ -726,7 +753,7 @@ fn compile_internal(
     tune: &Tunables,
     user_prepa: &mut (dyn FnMut(&mut Regs, &mut Value) + '_),
     retty: impl Iterator<Item = Type>,
-    mut hint_callback: Option<&mut (dyn FnMut(&mut HintCallbackContext<'_, '_>) + '_)>,
+    mut hint_handler: Option<&mut (dyn HintHandler + '_)>,
 ) -> Func {
     let n = tune.n;
     let _bleed = tune.bleed;
@@ -857,8 +884,8 @@ fn compile_internal(
                 gpr: args_iter.next_array().unwrap(),
             };
             
-            // Check for HINT instruction and invoke callback if enabled
-            if let Some(ref mut callback) = hint_callback {
+            // Check for HINT instruction and invoke handler if enabled
+            if let Some(ref mut handler) = hint_handler {
                 if opts.process_hints {
                     if let Some(marker) = detect_hint(&inst) {
                         let hint_info = HintInfo { marker, pc: h };
@@ -871,7 +898,7 @@ fn compile_internal(
                             regs: &mut uregs,
                             pc_value: rpc,
                         };
-                        callback(&mut ctx);
+                        handler.on_hint(&mut ctx);
                     }
                 }
             }
@@ -1015,7 +1042,7 @@ pub fn compile(
 /// * `tune` - Tuning parameters for compilation
 /// * `user_prepa` - User preparation callback for register/PC initialization
 /// * `retty` - Return type iterator for the compiled function
-/// * `hint_callback` - Callback invoked for each HINT instruction when `process_hints` is true
+/// * `hint_handler` - Handler invoked for each HINT instruction when `process_hints` is true
 ///
 /// # Example
 ///
@@ -1030,7 +1057,7 @@ pub fn compile(
 ///     &tune,
 ///     &mut |_, _| {},
 ///     std::iter::repeat(Type::I64).take(33),
-///     &mut |ctx| {
+///     &mut |ctx: &mut HintCallbackContext| {
 ///         hints_found.push(ctx.hint.clone());
 ///     },
 /// );
@@ -1044,9 +1071,9 @@ pub fn compile_with_hints(
     tune: &Tunables,
     user_prepa: &mut (dyn FnMut(&mut Regs, &mut Value) + '_),
     retty: impl Iterator<Item = Type>,
-    hint_callback: &mut (dyn FnMut(&mut HintCallbackContext<'_, '_>) + '_),
+    hint_handler: &mut (dyn HintHandler + '_),
 ) -> Func {
-    compile_internal(m, user, code, start, opts, tune, user_prepa, retty, Some(hint_callback))
+    compile_internal(m, user, code, start, opts, tune, user_prepa, retty, Some(hint_handler))
 }
 
 /// Scan code for HINT instructions and return a list of detected HINTs.
