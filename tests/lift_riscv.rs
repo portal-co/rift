@@ -359,3 +359,297 @@ fn test_extensibility_pattern() {
     assert_eq!(custom_variant.name, "rv32im");
     assert!(custom_variant.binaries.is_empty());
 }
+
+// ============================================================================
+// HINT Detection Tests
+// ============================================================================
+
+/// Test that detect_hint correctly identifies HINT instructions from rv-corpus
+#[test]
+fn test_detect_hint_basic() {
+    use rv_asm::{Inst, Reg, Imm};
+    
+    // HINT 1: addi x0, x0, 1
+    let hint1 = Inst::Addi {
+        dest: Reg(0),
+        src1: Reg(0),
+        imm: Imm::new_i32(1),
+    };
+    assert_eq!(rift::detect_hint(&hint1), Some(1));
+    
+    // HINT 42: addi x0, x0, 42
+    let hint42 = Inst::Addi {
+        dest: Reg(0),
+        src1: Reg(0),
+        imm: Imm::new_i32(42),
+    };
+    assert_eq!(rift::detect_hint(&hint42), Some(42));
+    
+    // HINT with negative marker (allowed by format)
+    let hint_neg = Inst::Addi {
+        dest: Reg(0),
+        src1: Reg(0),
+        imm: Imm::new_i32(-5),
+    };
+    assert_eq!(rift::detect_hint(&hint_neg), Some(-5));
+    
+    // NOP (addi x0, x0, 0) should NOT be detected as a test marker
+    let nop = Inst::Addi {
+        dest: Reg(0),
+        src1: Reg(0),
+        imm: Imm::new_i32(0),
+    };
+    assert_eq!(rift::detect_hint(&nop), None);
+    
+    // Regular ADDI (not to x0) should not be detected
+    let regular_addi = Inst::Addi {
+        dest: Reg(10), // a0
+        src1: Reg(0),
+        imm: Imm::new_i32(5),
+    };
+    assert_eq!(rift::detect_hint(&regular_addi), None);
+    
+    // ADDI with rs1 != x0 should not be detected as primary HINT format
+    let hint_other_src = Inst::Addi {
+        dest: Reg(0),
+        src1: Reg(10), // a0
+        imm: Imm::new_i32(0),
+    };
+    assert_eq!(rift::detect_hint(&hint_other_src), None);
+}
+
+/// Test that is_hint_instruction correctly identifies all HINT types
+#[test]
+fn test_is_hint_instruction() {
+    use rv_asm::{Inst, Reg, Imm};
+    
+    // All these should be identified as HINTs (rd=x0)
+    
+    // ADDI x0, x0, 0 (NOP) is a HINT
+    assert!(rift::is_hint_instruction(&Inst::Addi {
+        dest: Reg(0),
+        src1: Reg(0),
+        imm: Imm::new_i32(0),
+    }));
+    
+    // ADDI x0, x0, N is a HINT
+    assert!(rift::is_hint_instruction(&Inst::Addi {
+        dest: Reg(0),
+        src1: Reg(0),
+        imm: Imm::new_i32(5),
+    }));
+    
+    // ADDI x0, rs1, 0 is a HINT
+    assert!(rift::is_hint_instruction(&Inst::Addi {
+        dest: Reg(0),
+        src1: Reg(10),
+        imm: Imm::new_i32(0),
+    }));
+    
+    // ADD x0, rs1, rs2 is a HINT
+    assert!(rift::is_hint_instruction(&Inst::Add {
+        dest: Reg(0),
+        src1: Reg(10),
+        src2: Reg(11),
+    }));
+    
+    // Regular ADD (rd != x0) is NOT a HINT
+    assert!(!rift::is_hint_instruction(&Inst::Add {
+        dest: Reg(10),
+        src1: Reg(11),
+        src2: Reg(12),
+    }));
+    
+    // Load instructions are NOT HINTs even if dest is x0
+    // (they have side effects beyond the register write)
+    assert!(!rift::is_hint_instruction(&Inst::Lw {
+        dest: Reg(0),
+        base: Reg(2),
+        offset: Imm::new_i32(0),
+    }));
+}
+
+/// Test scan_hints on actual rv-corpus binary
+#[test]
+fn test_scan_hints_on_binary() {
+    let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures");
+    
+    let binary_path = fixtures_dir.join("rv32i/01_integer_computational");
+    
+    if !binary_path.exists() {
+        println!("Skipping test: binary not found (submodule not initialized?)");
+        return;
+    }
+    
+    let data = std::fs::read(&binary_path).expect("Failed to read binary");
+    let (code, start_addr) = extract_code_from_elf(&data).expect("Failed to extract code");
+    
+    // Scan for HINTs
+    let hints = rift::scan_hints(&code, start_addr, rv_asm::Xlen::Rv32);
+    
+    // The 01_integer_computational.s file has HINT markers 1-14
+    // Verify we found some HINTs
+    assert!(!hints.is_empty(), "Should find HINT markers in test binary");
+    
+    // Check that marker values are reasonable (1-14 based on the source)
+    for hint in &hints {
+        // rv-corpus uses markers 1-2047 for positive markers
+        assert!(hint.marker > 0 && hint.marker <= 2047, 
+            "Marker {} should be in valid range", hint.marker);
+    }
+    
+    // Verify we found the expected number of markers (14 in this file)
+    assert_eq!(hints.len(), 14, 
+        "Expected 14 HINT markers in 01_integer_computational, found {}", hints.len());
+}
+
+/// Test that HintInfo struct works correctly
+#[test]
+fn test_hint_info_struct() {
+    let hint = rift::HintInfo {
+        marker: 42,
+        pc: 0x1000,
+    };
+    
+    assert_eq!(hint.marker, 42);
+    assert_eq!(hint.pc, 0x1000);
+    
+    // Test equality
+    let hint2 = rift::HintInfo {
+        marker: 42,
+        pc: 0x1000,
+    };
+    assert_eq!(hint, hint2);
+    
+    let hint3 = rift::HintInfo {
+        marker: 43,
+        pc: 0x1000,
+    };
+    assert_ne!(hint, hint3);
+}
+
+/// Test scan_all_hints returns both markers and non-marker HINTs
+#[test]
+fn test_scan_all_hints() {
+    let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures");
+    
+    let binary_path = fixtures_dir.join("rv32i/06_nop_and_hints");
+    
+    if !binary_path.exists() {
+        println!("Skipping test: binary not found (submodule not initialized?)");
+        return;
+    }
+    
+    let data = std::fs::read(&binary_path).expect("Failed to read binary");
+    let (code, start_addr) = extract_code_from_elf(&data).expect("Failed to extract code");
+    
+    // Scan for all HINTs (including NOPs)
+    let all_hints = rift::scan_all_hints(&code, start_addr, rv_asm::Xlen::Rv32);
+    
+    // Should find multiple HINTs/NOPs in this file
+    assert!(!all_hints.is_empty(), "Should find HINTs in test binary");
+    
+    let mut markers = 0;
+    let mut nops = 0;
+    
+    for (pc, inst, marker) in &all_hints {
+        if let Some(m) = marker {
+            println!("Found HINT marker {} at PC {:#x}: {}", m, pc, inst);
+            markers += 1;
+        } else {
+            println!("Found NOP/HINT at PC {:#x}: {}", pc, inst);
+            nops += 1;
+        }
+    }
+    
+    println!("Total: {} markers, {} NOPs/other HINTs", markers, nops);
+    
+    // The 06_nop_and_hints.s file has both NOPs and HINT instructions
+    assert!(nops > 0, "Should find NOPs in nop_and_hints test");
+}
+
+/// Test compile_with_hints callback is invoked for HINT instructions
+#[test]
+fn test_compile_with_hints_callback() {
+    let fixtures_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures");
+    
+    let binary_path = fixtures_dir.join("rv32i/01_integer_computational");
+    
+    if !binary_path.exists() {
+        println!("Skipping test: binary not found (submodule not initialized?)");
+        return;
+    }
+    
+    let data = std::fs::read(&binary_path).expect("Failed to read binary");
+    let (code, start_addr) = extract_code_from_elf(&data).expect("Failed to extract code");
+    
+    // Create the input structure
+    let input = create_input(code);
+    
+    // Create a minimal module
+    let MinimalModule { mut module, memory, table, ecall } = create_minimal_module();
+    
+    // Configure options with HINT processing enabled
+    let opts = Opts {
+        mem: memory,
+        table,
+        ecall,
+        mapper: None,
+        inline_ecall: true,
+    };
+    
+    // Configure tuning parameters
+    let tune = Tunables { n: 256, bleed: 64 };
+    
+    // Collect HINTs via callback
+    let mut collected_hints: Vec<rift::HintInfo> = Vec::new();
+    
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _func = rift::compile_with_hints(
+            &mut module,
+            vec![], // No user types
+            input.as_ref(),
+            start_addr,
+            opts,
+            &tune,
+            &mut |_, _| {}, // No user preparation
+            std::iter::repeat(Type::I64).take(33),
+            &mut |ctx: &mut rift::HintCallbackContext| {
+                // Callback is invoked for each HINT
+                collected_hints.push(ctx.hint.clone());
+            },
+        );
+    }));
+    
+    match result {
+        Ok(()) => {
+            // Verify that the callback collected the expected HINTs
+            assert!(!collected_hints.is_empty(), "Should collect HINT markers via callback");
+            
+            // The 01_integer_computational.s file has HINT markers 1-14
+            assert_eq!(collected_hints.len(), 14, 
+                "Expected 14 HINT markers, found {}", collected_hints.len());
+            
+            // Verify marker values are in expected range
+            for hint in &collected_hints {
+                assert!(hint.marker >= 1 && hint.marker <= 14,
+                    "Marker {} should be between 1 and 14", hint.marker);
+            }
+            
+            // Verify we got markers 1-14 (in any order due to compilation order)
+            let mut markers: Vec<i32> = collected_hints.iter().map(|h| h.marker).collect();
+            markers.sort();
+            let expected: Vec<i32> = (1..=14).collect();
+            assert_eq!(markers, expected, "Should have markers 1-14");
+        }
+        Err(e) => {
+            panic!("compile_with_hints should not panic: {:?}", e);
+        }
+    }
+}

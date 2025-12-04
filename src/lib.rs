@@ -20,6 +20,170 @@ use portal_pc_waffle::{
     Block, BlockTarget, Func, FuncDecl, FunctionBody, Memory, MemoryArg, Module, Operator, Table,
     Type, Value, util::new_sig, util::results_ref_2,
 };
+
+/// Information about a detected HINT instruction.
+///
+/// HINT instructions are RISC-V instructions that write to x0 (which is hardwired
+/// to zero), making them architectural no-ops that can carry metadata.
+///
+/// The primary format used by rv-corpus is `addi x0, x0, N` where N is a test
+/// case marker value (1-2047 for positive values).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct HintInfo {
+    /// The immediate value from the HINT instruction (marker value).
+    /// For `addi x0, x0, N`, this is N.
+    pub marker: i32,
+    /// The PC address where this HINT was encountered.
+    pub pc: u64,
+}
+
+/// Context passed to the HINT callback during inline processing.
+///
+/// This structure provides access to the current compilation state when a HINT
+/// instruction is encountered, allowing the callback to inspect or modify the
+/// generated WebAssembly code.
+///
+/// For complex branching, the handler can modify the `block` field to change
+/// which block subsequent instructions will be added to.
+pub struct HintCallbackContext<'a, 'b> {
+    /// The HINT information (marker value and PC)
+    pub hint: HintInfo,
+    /// The decoded HINT instruction
+    pub instruction: &'a Inst,
+    /// The WebAssembly module being constructed
+    pub module: &'a mut Module<'b>,
+    /// The current function body being built
+    pub function: &'a mut FunctionBody,
+    /// The current block where the HINT was encountered.
+    /// This can be modified by the handler to support complex branching -
+    /// subsequent code will be added to the updated block.
+    pub block: &'a mut Block,
+    /// The current register state
+    pub regs: &'a mut Regs,
+    /// The PC value as a WebAssembly Value
+    pub pc_value: Value,
+}
+
+/// Trait for handling HINT instructions during compilation.
+///
+/// This trait is invoked for each HINT instruction encountered during
+/// compilation when a handler is provided to `compile_with_hints`.
+///
+/// The handler receives a `HintCallbackContext` which provides access to:
+/// - The HINT marker value and PC
+/// - The decoded instruction
+/// - The WebAssembly module and function being built
+/// - The current block and register state
+///
+/// # Example
+///
+/// ```ignore
+/// struct MyHintHandler {
+///     hints_found: Vec<HintInfo>,
+/// }
+///
+/// impl HintHandler for MyHintHandler {
+///     fn on_hint(&mut self, ctx: &mut HintCallbackContext<'_, '_>) {
+///         self.hints_found.push(ctx.hint.clone());
+///     }
+/// }
+/// ```
+pub trait HintHandler {
+    /// Called when a HINT instruction is encountered during compilation.
+    ///
+    /// The context provides mutable access to the compilation state, allowing
+    /// the handler to inspect the HINT or modify the generated WebAssembly code.
+    fn on_hint(&mut self, ctx: &mut HintCallbackContext<'_, '_>);
+}
+
+/// Blanket implementation of `HintHandler` for any `FnMut` closure.
+///
+/// This allows using closures directly as hint handlers:
+///
+/// ```ignore
+/// let mut hints_found = Vec::new();
+/// compile_with_hints(
+///     // ... other args ...
+///     &mut |ctx: &mut HintCallbackContext| {
+///         hints_found.push(ctx.hint.clone());
+///     },
+/// );
+/// ```
+impl<F> HintHandler for F
+where
+    F: FnMut(&mut HintCallbackContext<'_, '_>),
+{
+    fn on_hint(&mut self, ctx: &mut HintCallbackContext<'_, '_>) {
+        self(ctx)
+    }
+}
+
+/// Checks if an instruction is a HINT instruction.
+///
+/// According to the RISC-V specification (Section 2.9):
+/// "HINT instructions are usually used to communicate performance hints to the
+/// microarchitecture. HINTs are encoded as integer computational instructions
+/// with rd=x0."
+///
+/// This function specifically detects the `addi x0, x0, N` format used by
+/// rv-corpus for test case markers.
+///
+/// Returns `Some(marker)` if the instruction is a HINT with a non-zero
+/// immediate (since `addi x0, x0, 0` is the canonical NOP encoding).
+pub fn detect_hint(inst: &Inst) -> Option<i32> {
+    match inst {
+        // Primary HINT format: addi x0, x0, imm (where imm != 0)
+        // When imm == 0, this is the canonical NOP, not a test marker
+        Inst::Addi { dest, src1, imm } if dest.0 == 0 && src1.0 == 0 => {
+            let marker = imm.as_i32();
+            if marker != 0 {
+                Some(marker)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Checks if an instruction is any kind of HINT (including NOP).
+///
+/// This is a broader check that identifies any instruction that writes to x0,
+/// which includes:
+/// - `addi x0, x0, 0` (NOP)
+/// - `addi x0, x0, N` (HINT with marker)
+/// - `addi x0, rs1, 0` (HINT)
+/// - Other computational instructions with rd=x0
+pub fn is_hint_instruction(inst: &Inst) -> bool {
+    match inst {
+        // Any ADDI with dest=x0 is a HINT
+        Inst::Addi { dest, .. } if dest.0 == 0 => true,
+        // Other computational instructions with rd=x0 are also HINTs
+        Inst::Slti { dest, .. } if dest.0 == 0 => true,
+        Inst::Sltiu { dest, .. } if dest.0 == 0 => true,
+        Inst::Andi { dest, .. } if dest.0 == 0 => true,
+        Inst::Ori { dest, .. } if dest.0 == 0 => true,
+        Inst::Xori { dest, .. } if dest.0 == 0 => true,
+        Inst::Slli { dest, .. } if dest.0 == 0 => true,
+        Inst::Srli { dest, .. } if dest.0 == 0 => true,
+        Inst::Srai { dest, .. } if dest.0 == 0 => true,
+        Inst::Add { dest, .. } if dest.0 == 0 => true,
+        Inst::Sub { dest, .. } if dest.0 == 0 => true,
+        Inst::Sll { dest, .. } if dest.0 == 0 => true,
+        Inst::Srl { dest, .. } if dest.0 == 0 => true,
+        Inst::Sra { dest, .. } if dest.0 == 0 => true,
+        Inst::Slt { dest, .. } if dest.0 == 0 => true,
+        Inst::Sltu { dest, .. } if dest.0 == 0 => true,
+        Inst::And { dest, .. } if dest.0 == 0 => true,
+        Inst::Or { dest, .. } if dest.0 == 0 => true,
+        Inst::Xor { dest, .. } if dest.0 == 0 => true,
+        // LUI and AUIPC with non-zero immediate and rd=x0 are also HINTs
+        Inst::Lui { dest, uimm } if dest.0 == 0 && uimm.as_u32() != 0 => true,
+        Inst::Auipc { dest, uimm } if dest.0 == 0 && uimm.as_u32() != 0 => true,
+        _ => false,
+    }
+}
+
 pub struct Regs {
     pub gpr: [Value; 31],
     pub user: Vec<Value>,
@@ -571,22 +735,25 @@ impl Opts {
         }
     }
 }
-pub fn compile(
-    m: &mut Module,
+
+/// Internal helper function for compiling RISC-V code with optional HINT handler.
+///
+/// This function contains the shared implementation used by both `compile` and
+/// `compile_with_hints`. The `hint_handler` parameter is `Option` - when `None`,
+/// HINT processing is skipped.
+fn compile_internal(
+    m: &mut Module<'_>,
     user: Vec<Type>,
     code: InputRef<'_>,
     start: u64,
     opts: Opts,
-    // etab: Table,
     tune: &Tunables,
-    // mut decode: impl FnMut(u32) -> Option<I>,
-    mut user_prepa: &mut (dyn FnMut(&mut Regs, &mut Value) + '_),
-    // memory: Memory,
+    user_prepa: &mut (dyn FnMut(&mut Regs, &mut Value) + '_),
     retty: impl Iterator<Item = Type>,
-    // utils: &Utils,
+    mut hint_handler: Option<&mut (dyn HintHandler + '_)>,
 ) -> Func {
     let n = tune.n;
-    let bleed = tune.bleed;
+    let _bleed = tune.bleed;
     let base = user.iter().cloned().chain([Type::I64; 31]);
     let mut code_fns: Vec<Func> = vec![];
     let j_sig = new_sig(
@@ -606,29 +773,8 @@ pub fn compile(
         .windows(4)
         .enumerate()
         .filter_map(|(i, j)| Some((i as u64 + start, u32::from_le_bytes(j.try_into().ok()?))));
-    // let pages = pages.into_iter().map(|a| a.collect_vec()).collect_vec();
-    for (i, page) in tune.paged_chunks(pages).enumerate() {
-        // let mut page = pages
-        //     .get(i.wrapping_sub(1))
-        //     .into_iter()
-        //     .flat_map(|a| a.iter())
-        //     .skip(n - bleed)
-        // let mut page = (0..=(bleed / n))
-        //     .rev()
-        //     .flat_map(|j| pages.get(i.wrapping_sub(j + 1)))
-        //     .flat_map(|a| a.iter())
-        //     .skip(if i * n > bleed {
-        //         (bleed / n * n) - bleed
-        //     } else {
-        //         0usize
-        //     })
-        //     .chain(page.iter())
-        //     .chain(
-        //         (0..=(bleed / n))
-        //             .flat_map(|j| pages.get(i + j + 1).into_iter().flat_map(|a| a.iter()))
-        //             .take(bleed),
-        //     )
-        //     .cloned();
+    
+    for (_i, page) in tune.paged_chunks(pages).enumerate() {
         let mut f = FunctionBody::new(&m, f_sig);
         let mut page = page.peekable();
         let Some((this_start, _)) = page.peek().cloned() else {
@@ -664,7 +810,7 @@ pub fn compile(
             &[Type::I64],
         );
         let jt_this_page = f.add_op(f.entry, Operator::I64Sub, &[jt, jt_this_page], &[Type::I64]);
-        let jt_root = f.add_op(f.entry, Operator::I64Sub, &[jt, jt_root], &[Type::I64]);
+        let _jt_root = f.add_op(f.entry, Operator::I64Sub, &[jt, jt_root], &[Type::I64]);
         let s = f.add_block();
         let fail = f.add_block();
         f.set_terminator(fail, portal_pc_waffle::Terminator::UB);
@@ -702,9 +848,10 @@ pub fn compile(
                 args: args.iter().cloned().chain(once(jt)).collect(),
             },
         );
-        for (ri, (h, i, BlockTarget { block, mut args })) in instrs.iter().cloned().enumerate() {
-            let mut rpc = args.pop().unwrap();
-            let Some(i) = Inst::decode_normal(i, rv_asm::Xlen::Rv64).ok() else {
+        for (ri, (h, i, BlockTarget { block: orig_block, mut args })) in instrs.iter().cloned().enumerate() {
+            let mut block = orig_block;
+            let rpc = args.pop().unwrap();
+            let Some(inst) = Inst::decode_normal(i, rv_asm::Xlen::Rv64).ok() else {
                 let r = f.add_op(block, Operator::I32Const { value: 1 }, &[], &[Type::I32]);
                 f.set_terminator(
                     block,
@@ -726,39 +873,54 @@ pub fn compile(
                         None => f.entry,
                     }
                 } else {
-                    block
+                    orig_block
                 }
             });
-            let mut args = args.drain(..);
+            let mut args_iter = args.drain(..);
             let mut uregs = Regs {
-                user: user.iter().filter_map(|x| args.next()).collect(),
-                gpr: args.next_array().unwrap(),
+                user: user.iter().filter_map(|_x| args_iter.next()).collect(),
+                gpr: args_iter.next_array().unwrap(),
             };
+            
+            // Check for HINT instruction and invoke handler if provided
+            // The handler can modify `block` to support complex branching
+            if let Some(ref mut handler) = hint_handler {
+                if let Some(marker) = detect_hint(&inst) {
+                    let hint_info = HintInfo { marker, pc: h };
+                    let mut ctx = HintCallbackContext {
+                        hint: hint_info,
+                        instruction: &inst,
+                        module: m,
+                        function: &mut f,
+                        block: &mut block,
+                        regs: &mut uregs,
+                        pc_value: rpc,
+                    };
+                    handler.on_hint(&mut ctx);
+                    // block may have been updated by the handler for complex branching
+                }
+            }
+            
+            // Use the potentially updated block for subsequent operations
             let orpc = rpc;
             let x = f.add_op(block, Operator::I64Const { value: 4 }, &[], &[Type::I64]);
-            let mut rpc = f.add_op(block, Operator::I64Add, &[rpc, x], &[Type::I64]);
+            let rpc = f.add_op(block, Operator::I64Add, &[rpc, x], &[Type::I64]);
             compile_one(
                 m,
                 &mut f,
                 &mut uregs,
                 RiscVContext {
                     block,
-                    // mem,
                     rbs,
                     pc_value: rpc,
                     original_pc_value: orpc,
                     pc: h,
                     local_instruction_index: ri,
                     opts,
-                    // ecall,
-                    // table,
-                    // etab,
                 },
-                i,
-                // utils,
+                inst,
                 &instrs,
                 code.nest(),
-                // memory,
                 j,
             );
         }
@@ -769,6 +931,7 @@ pub fn compile(
         ));
         code_fns.push(f);
     }
+    
     let ti = m.tables[opts.table].func_elements.as_mut().unwrap().len() as u64;
     m.tables[opts.table]
         .func_elements
@@ -799,7 +962,7 @@ pub fn compile(
         let mut args = args.clone();
         let mut args = args.drain(..);
         let mut uregs = Regs {
-            user: user.iter().filter_map(|x| args.next()).collect(),
+            user: user.iter().filter_map(|_x| args.next()).collect(),
             gpr: args.next_array().unwrap(),
         };
         let mut rpc = jt;
@@ -834,4 +997,155 @@ pub fn compile(
     );
     m.funcs[j] = FuncDecl::Body(j_sig, format!("r5_jmp"), f);
     return j;
+}
+
+/// Compile RISC-V code to WebAssembly.
+///
+/// This function compiles RISC-V binary code into WebAssembly, creating the
+/// necessary function bodies and table entries for execution.
+///
+/// For HINT instruction processing during compilation, use [`compile_with_hints`]
+/// instead.
+pub fn compile(
+    m: &mut Module,
+    user: Vec<Type>,
+    code: InputRef<'_>,
+    start: u64,
+    opts: Opts,
+    tune: &Tunables,
+    user_prepa: &mut (dyn FnMut(&mut Regs, &mut Value) + '_),
+    retty: impl Iterator<Item = Type>,
+) -> Func {
+    compile_internal(m, user, code, start, opts, tune, user_prepa, retty, None)
+}
+
+/// Compile RISC-V code to WebAssembly with inline HINT processing.
+///
+/// This is an extended version of [`compile`] that supports inline processing
+/// of HINT instructions through a handler. When a HINT instruction
+/// (`addi x0, x0, N` where N != 0) is encountered, the provided handler is invoked.
+///
+/// This is useful for:
+/// - Test case boundary detection during compilation
+/// - Instrumenting generated code at HINT locations
+/// - Collecting HINT markers during compilation
+///
+/// # Arguments
+///
+/// * `m` - The WebAssembly module to add functions to
+/// * `user` - User-defined types for the function signature
+/// * `code` - The RISC-V binary code to compile
+/// * `start` - The starting address of the code
+/// * `opts` - Compilation options
+/// * `tune` - Tuning parameters for compilation
+/// * `user_prepa` - User preparation callback for register/PC initialization
+/// * `retty` - Return type iterator for the compiled function
+/// * `hint_handler` - Handler invoked for each HINT instruction
+///
+/// # Example
+///
+/// ```ignore
+/// let mut hints_found = Vec::new();
+/// let func = compile_with_hints(
+///     &mut module,
+///     vec![],
+///     code.as_ref(),
+///     start_addr,
+///     opts,
+///     &tune,
+///     &mut |_, _| {},
+///     std::iter::repeat(Type::I64).take(33),
+///     &mut |ctx: &mut HintCallbackContext| {
+///         hints_found.push(ctx.hint.clone());
+///     },
+/// );
+/// ```
+pub fn compile_with_hints(
+    m: &mut Module<'_>,
+    user: Vec<Type>,
+    code: InputRef<'_>,
+    start: u64,
+    opts: Opts,
+    tune: &Tunables,
+    user_prepa: &mut (dyn FnMut(&mut Regs, &mut Value) + '_),
+    retty: impl Iterator<Item = Type>,
+    hint_handler: &mut (dyn HintHandler + '_),
+) -> Func {
+    compile_internal(m, user, code, start, opts, tune, user_prepa, retty, Some(hint_handler))
+}
+
+/// Scan code for HINT instructions and return a list of detected HINTs.
+///
+/// This function scans through RISC-V binary code looking for HINT markers
+/// (specifically `addi x0, x0, N` where N != 0) which are used by rv-corpus
+/// to mark test case boundaries.
+///
+/// # Arguments
+///
+/// * `code` - The binary code bytes to scan
+/// * `start` - The starting address of the code
+/// * `xlen` - The RISC-V xlen (Rv32 or Rv64)
+///
+/// # Returns
+///
+/// A vector of `HintInfo` structs, each containing the marker value and PC
+/// address where the HINT was found.
+pub fn scan_hints(code: &[u8], start: u64, xlen: rv_asm::Xlen) -> Vec<HintInfo> {
+    let mut hints = Vec::new();
+    
+    for (offset, window) in code.windows(4).enumerate() {
+        if let Ok(bytes) = window.try_into() {
+            let instruction = u32::from_le_bytes(bytes);
+            if let Ok(inst) = Inst::decode_normal(instruction, xlen) {
+                if let Some(marker) = detect_hint(&inst) {
+                    hints.push(HintInfo {
+                        marker,
+                        pc: start + offset as u64,
+                    });
+                }
+            }
+        }
+    }
+    
+    hints
+}
+
+/// Scan code for all HINT instructions (including NOP) and return details.
+///
+/// This is a more comprehensive version of `scan_hints` that includes
+/// all instructions that qualify as HINTs according to the RISC-V specification,
+/// including the canonical NOP (`addi x0, x0, 0`).
+///
+/// # Arguments
+///
+/// * `code` - The binary code bytes to scan
+/// * `start` - The starting address of the code
+/// * `xlen` - The RISC-V xlen (Rv32 or Rv64)
+///
+/// # Returns
+///
+/// A vector of tuples containing (pc, instruction, marker) where:
+/// - `pc` is the address of the instruction
+/// - `instruction` is the decoded `Inst`
+/// - `marker` is `Some(marker_value)` if this is a test case marker, `None` otherwise
+pub fn scan_all_hints(
+    code: &[u8],
+    start: u64,
+    xlen: rv_asm::Xlen,
+) -> Vec<(u64, Inst, Option<i32>)> {
+    let mut hints = Vec::new();
+    
+    for (offset, window) in code.windows(4).enumerate() {
+        if let Ok(bytes) = window.try_into() {
+            let instruction = u32::from_le_bytes(bytes);
+            if let Ok(inst) = Inst::decode_normal(instruction, xlen) {
+                if is_hint_instruction(&inst) {
+                    let marker = detect_hint(&inst);
+                    hints.push((start + offset as u64, inst, marker));
+                }
+            }
+        }
+    }
+    
+    hints
 }
