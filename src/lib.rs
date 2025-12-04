@@ -20,6 +20,89 @@ use portal_pc_waffle::{
     Block, BlockTarget, Func, FuncDecl, FunctionBody, Memory, MemoryArg, Module, Operator, Table,
     Type, Value, util::new_sig, util::results_ref_2,
 };
+
+/// Information about a detected HINT instruction.
+///
+/// HINT instructions are RISC-V instructions that write to x0 (which is hardwired
+/// to zero), making them architectural no-ops that can carry metadata.
+///
+/// The primary format used by rv-corpus is `addi x0, x0, N` where N is a test
+/// case marker value (1-2047 for positive values).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct HintInfo {
+    /// The immediate value from the HINT instruction (marker value).
+    /// For `addi x0, x0, N`, this is N.
+    pub marker: i32,
+    /// The PC address where this HINT was encountered.
+    pub pc: u64,
+}
+
+/// Checks if an instruction is a HINT instruction.
+///
+/// According to the RISC-V specification (Section 2.9):
+/// "HINT instructions are usually used to communicate performance hints to the
+/// microarchitecture. HINTs are encoded as integer computational instructions
+/// with rd=x0."
+///
+/// This function specifically detects the `addi x0, x0, N` format used by
+/// rv-corpus for test case markers.
+///
+/// Returns `Some(marker)` if the instruction is a HINT with a non-zero
+/// immediate (since `addi x0, x0, 0` is the canonical NOP encoding).
+pub fn detect_hint(inst: &Inst) -> Option<i32> {
+    match inst {
+        // Primary HINT format: addi x0, x0, imm (where imm != 0)
+        // When imm == 0, this is the canonical NOP, not a test marker
+        Inst::Addi { dest, src1, imm } if dest.0 == 0 && src1.0 == 0 => {
+            let marker = imm.as_i32();
+            if marker != 0 {
+                Some(marker)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Checks if an instruction is any kind of HINT (including NOP).
+///
+/// This is a broader check that identifies any instruction that writes to x0,
+/// which includes:
+/// - `addi x0, x0, 0` (NOP)
+/// - `addi x0, x0, N` (HINT with marker)
+/// - `addi x0, rs1, 0` (HINT)
+/// - Other computational instructions with rd=x0
+pub fn is_hint_instruction(inst: &Inst) -> bool {
+    match inst {
+        // Any ADDI with dest=x0 is a HINT
+        Inst::Addi { dest, .. } if dest.0 == 0 => true,
+        // Other computational instructions with rd=x0 are also HINTs
+        Inst::Slti { dest, .. } if dest.0 == 0 => true,
+        Inst::Sltiu { dest, .. } if dest.0 == 0 => true,
+        Inst::Andi { dest, .. } if dest.0 == 0 => true,
+        Inst::Ori { dest, .. } if dest.0 == 0 => true,
+        Inst::Xori { dest, .. } if dest.0 == 0 => true,
+        Inst::Slli { dest, .. } if dest.0 == 0 => true,
+        Inst::Srli { dest, .. } if dest.0 == 0 => true,
+        Inst::Srai { dest, .. } if dest.0 == 0 => true,
+        Inst::Add { dest, .. } if dest.0 == 0 => true,
+        Inst::Sub { dest, .. } if dest.0 == 0 => true,
+        Inst::Sll { dest, .. } if dest.0 == 0 => true,
+        Inst::Srl { dest, .. } if dest.0 == 0 => true,
+        Inst::Sra { dest, .. } if dest.0 == 0 => true,
+        Inst::Slt { dest, .. } if dest.0 == 0 => true,
+        Inst::Sltu { dest, .. } if dest.0 == 0 => true,
+        Inst::And { dest, .. } if dest.0 == 0 => true,
+        Inst::Or { dest, .. } if dest.0 == 0 => true,
+        Inst::Xor { dest, .. } if dest.0 == 0 => true,
+        // LUI and AUIPC with non-zero immediate and rd=x0 are also HINTs
+        Inst::Lui { dest, uimm } if dest.0 == 0 && uimm.as_u32() != 0 => true,
+        Inst::Auipc { dest, uimm } if dest.0 == 0 && uimm.as_u32() != 0 => true,
+        _ => false,
+    }
+}
+
 pub struct Regs {
     pub gpr: [Value; 31],
     pub user: Vec<Value>,
@@ -534,6 +617,14 @@ pub struct Opts {
     pub ecall: Func,
     pub mapper: Option<(Func, Type)>,
     pub inline_ecall: bool,
+    /// Enable processing of HINT instructions from rv-corpus test suite.
+    ///
+    /// When enabled, HINT instructions (specifically `addi x0, x0, N` where N != 0)
+    /// will be detected during compilation. This is useful for testing and debugging
+    /// with the rv-corpus test binaries which use HINT markers to identify test cases.
+    ///
+    /// When disabled (default), HINT instructions are treated as regular no-ops.
+    pub process_hints: bool,
 }
 impl Opts {
     fn map(
@@ -834,4 +925,80 @@ pub fn compile(
     );
     m.funcs[j] = FuncDecl::Body(j_sig, format!("r5_jmp"), f);
     return j;
+}
+
+/// Scan code for HINT instructions and return a list of detected HINTs.
+///
+/// This function scans through RISC-V binary code looking for HINT markers
+/// (specifically `addi x0, x0, N` where N != 0) which are used by rv-corpus
+/// to mark test case boundaries.
+///
+/// # Arguments
+///
+/// * `code` - The binary code bytes to scan
+/// * `start` - The starting address of the code
+/// * `xlen` - The RISC-V xlen (Rv32 or Rv64)
+///
+/// # Returns
+///
+/// A vector of `HintInfo` structs, each containing the marker value and PC
+/// address where the HINT was found.
+pub fn scan_hints(code: &[u8], start: u64, xlen: rv_asm::Xlen) -> Vec<HintInfo> {
+    let mut hints = Vec::new();
+    
+    for (offset, window) in code.windows(4).enumerate() {
+        if let Ok(bytes) = window.try_into() {
+            let instruction = u32::from_le_bytes(bytes);
+            if let Ok(inst) = Inst::decode_normal(instruction, xlen) {
+                if let Some(marker) = detect_hint(&inst) {
+                    hints.push(HintInfo {
+                        marker,
+                        pc: start + offset as u64,
+                    });
+                }
+            }
+        }
+    }
+    
+    hints
+}
+
+/// Scan code for all HINT instructions (including NOP) and return details.
+///
+/// This is a more comprehensive version of `scan_hints` that includes
+/// all instructions that qualify as HINTs according to the RISC-V specification,
+/// including the canonical NOP (`addi x0, x0, 0`).
+///
+/// # Arguments
+///
+/// * `code` - The binary code bytes to scan
+/// * `start` - The starting address of the code
+/// * `xlen` - The RISC-V xlen (Rv32 or Rv64)
+///
+/// # Returns
+///
+/// A vector of tuples containing (pc, instruction, is_marker) where:
+/// - `pc` is the address of the instruction
+/// - `instruction` is the decoded `Inst`
+/// - `is_marker` is `Some(marker)` if this is a test case marker, `None` otherwise
+pub fn scan_all_hints(
+    code: &[u8],
+    start: u64,
+    xlen: rv_asm::Xlen,
+) -> Vec<(u64, Inst, Option<i32>)> {
+    let mut hints = Vec::new();
+    
+    for (offset, window) in code.windows(4).enumerate() {
+        if let Ok(bytes) = window.try_into() {
+            let instruction = u32::from_le_bytes(bytes);
+            if let Ok(inst) = Inst::decode_normal(instruction, xlen) {
+                if is_hint_instruction(&inst) {
+                    let marker = detect_hint(&inst);
+                    hints.push((start + offset as u64, inst, marker));
+                }
+            }
+        }
+    }
+    
+    hints
 }
