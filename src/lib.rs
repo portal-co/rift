@@ -67,7 +67,7 @@ pub struct HintCallbackContext<'a, 'b> {
 /// Trait for handling HINT instructions during compilation.
 ///
 /// This trait is invoked for each HINT instruction encountered during
-/// compilation when `Opts::process_hints` is enabled and a handler is provided.
+/// compilation when a handler is provided to `compile_with_hints`.
 ///
 /// The handler receives a `HintCallbackContext` which provides access to:
 /// - The HINT marker value and PC
@@ -698,14 +698,6 @@ pub struct Opts {
     pub ecall: Func,
     pub mapper: Option<(Func, Type)>,
     pub inline_ecall: bool,
-    /// Enable processing of HINT instructions from rv-corpus test suite.
-    ///
-    /// When enabled, HINT instructions (specifically `addi x0, x0, N` where N != 0)
-    /// will be detected during compilation. This is useful for testing and debugging
-    /// with the rv-corpus test binaries which use HINT markers to identify test cases.
-    ///
-    /// When disabled (default), HINT instructions are treated as regular no-ops.
-    pub process_hints: bool,
 }
 impl Opts {
     fn map(
@@ -748,7 +740,7 @@ impl Opts {
 ///
 /// This function contains the shared implementation used by both `compile` and
 /// `compile_with_hints`. The `hint_handler` parameter is `Option` - when `None`,
-/// HINT processing is skipped even if `opts.process_hints` is true.
+/// HINT processing is skipped.
 fn compile_internal(
     m: &mut Module<'_>,
     user: Vec<Type>,
@@ -890,24 +882,22 @@ fn compile_internal(
                 gpr: args_iter.next_array().unwrap(),
             };
             
-            // Check for HINT instruction and invoke handler if enabled
+            // Check for HINT instruction and invoke handler if provided
             // The handler can modify `block` to support complex branching
             if let Some(ref mut handler) = hint_handler {
-                if opts.process_hints {
-                    if let Some(marker) = detect_hint(&inst) {
-                        let hint_info = HintInfo { marker, pc: h };
-                        let mut ctx = HintCallbackContext {
-                            hint: hint_info,
-                            instruction: &inst,
-                            module: m,
-                            function: &mut f,
-                            block: &mut block,
-                            regs: &mut uregs,
-                            pc_value: rpc,
-                        };
-                        handler.on_hint(&mut ctx);
-                        // block may have been updated by the handler for complex branching
-                    }
+                if let Some(marker) = detect_hint(&inst) {
+                    let hint_info = HintInfo { marker, pc: h };
+                    let mut ctx = HintCallbackContext {
+                        hint: hint_info,
+                        instruction: &inst,
+                        module: m,
+                        function: &mut f,
+                        block: &mut block,
+                        regs: &mut uregs,
+                        pc_value: rpc,
+                    };
+                    handler.on_hint(&mut ctx);
+                    // block may have been updated by the handler for complex branching
                 }
             }
             
@@ -1032,9 +1022,8 @@ pub fn compile(
 /// Compile RISC-V code to WebAssembly with inline HINT processing.
 ///
 /// This is an extended version of [`compile`] that supports inline processing
-/// of HINT instructions through a callback. When `Opts::process_hints` is enabled
-/// and a HINT instruction (`addi x0, x0, N` where N != 0) is encountered, the
-/// provided callback is invoked.
+/// of HINT instructions through a handler. When a HINT instruction
+/// (`addi x0, x0, N` where N != 0) is encountered, the provided handler is invoked.
 ///
 /// This is useful for:
 /// - Test case boundary detection during compilation
@@ -1047,11 +1036,11 @@ pub fn compile(
 /// * `user` - User-defined types for the function signature
 /// * `code` - The RISC-V binary code to compile
 /// * `start` - The starting address of the code
-/// * `opts` - Compilation options (including `process_hints` flag)
+/// * `opts` - Compilation options
 /// * `tune` - Tuning parameters for compilation
 /// * `user_prepa` - User preparation callback for register/PC initialization
 /// * `retty` - Return type iterator for the compiled function
-/// * `hint_handler` - Handler invoked for each HINT instruction when `process_hints` is true
+/// * `hint_handler` - Handler invoked for each HINT instruction
 ///
 /// # Example
 ///
@@ -1062,7 +1051,7 @@ pub fn compile(
 ///     vec![],
 ///     code.as_ref(),
 ///     start_addr,
-///     Opts { process_hints: true, ..opts },
+///     opts,
 ///     &tune,
 ///     &mut |_, _| {},
 ///     std::iter::repeat(Type::I64).take(33),

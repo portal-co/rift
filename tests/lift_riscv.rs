@@ -178,7 +178,6 @@ fn lift_and_validate(binary_path: &Path) -> Result<(), String> {
         ecall,
         mapper: None,
         inline_ecall: true,
-        process_hints: false, // Disable HINT processing for basic lifting tests
     };
 
     // Configure tuning parameters
@@ -603,7 +602,6 @@ fn test_compile_with_hints_callback() {
         ecall,
         mapper: None,
         inline_ecall: true,
-        process_hints: true, // Enable HINT processing
     };
     
     // Configure tuning parameters
