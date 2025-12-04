@@ -42,6 +42,9 @@ pub struct HintInfo {
 /// This structure provides access to the current compilation state when a HINT
 /// instruction is encountered, allowing the callback to inspect or modify the
 /// generated WebAssembly code.
+///
+/// For complex branching, the handler can modify the `block` field to change
+/// which block subsequent instructions will be added to.
 pub struct HintCallbackContext<'a, 'b> {
     /// The HINT information (marker value and PC)
     pub hint: HintInfo,
@@ -51,8 +54,10 @@ pub struct HintCallbackContext<'a, 'b> {
     pub module: &'a mut Module<'b>,
     /// The current function body being built
     pub function: &'a mut FunctionBody,
-    /// The current block where the HINT was encountered
-    pub block: Block,
+    /// The current block where the HINT was encountered.
+    /// This can be modified by the handler to support complex branching -
+    /// subsequent code will be added to the updated block.
+    pub block: &'a mut Block,
     /// The current register state
     pub regs: &'a mut Regs,
     /// The PC value as a WebAssembly Value
@@ -851,7 +856,8 @@ fn compile_internal(
                 args: args.iter().cloned().chain(once(jt)).collect(),
             },
         );
-        for (ri, (h, i, BlockTarget { block, mut args })) in instrs.iter().cloned().enumerate() {
+        for (ri, (h, i, BlockTarget { block: orig_block, mut args })) in instrs.iter().cloned().enumerate() {
+            let mut block = orig_block;
             let rpc = args.pop().unwrap();
             let Some(inst) = Inst::decode_normal(i, rv_asm::Xlen::Rv64).ok() else {
                 let r = f.add_op(block, Operator::I32Const { value: 1 }, &[], &[Type::I32]);
@@ -875,7 +881,7 @@ fn compile_internal(
                         None => f.entry,
                     }
                 } else {
-                    block
+                    orig_block
                 }
             });
             let mut args_iter = args.drain(..);
@@ -885,6 +891,7 @@ fn compile_internal(
             };
             
             // Check for HINT instruction and invoke handler if enabled
+            // The handler can modify `block` to support complex branching
             if let Some(ref mut handler) = hint_handler {
                 if opts.process_hints {
                     if let Some(marker) = detect_hint(&inst) {
@@ -894,15 +901,17 @@ fn compile_internal(
                             instruction: &inst,
                             module: m,
                             function: &mut f,
-                            block,
+                            block: &mut block,
                             regs: &mut uregs,
                             pc_value: rpc,
                         };
                         handler.on_hint(&mut ctx);
+                        // block may have been updated by the handler for complex branching
                     }
                 }
             }
             
+            // Use the potentially updated block for subsequent operations
             let orpc = rpc;
             let x = f.add_op(block, Operator::I64Const { value: 4 }, &[], &[Type::I64]);
             let rpc = f.add_op(block, Operator::I64Add, &[rpc, x], &[Type::I64]);
