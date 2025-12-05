@@ -119,13 +119,18 @@ fn create_minimal_module() -> MinimalModule {
         table64: false,
     });
 
-    // Create ecall handler signature with 32 params/returns for RISC-V registers
-    // RISC-V has 32 GPRs (x0-x31), though x0 is hardwired to zero
+    // Create ecall handler signature with registers for RISC-V
+    // 31 GPRs (x1-x31) as I64 (x0 is hardwired to zero)
+    // 32 FPRs (f0-f31) as F64 for floating-point extensions
     let ecall_sig = portal_pc_waffle::util::new_sig(
         &mut module,
         portal_pc_waffle::SignatureData::Func {
-            params: std::iter::repeat(Type::I64).take(32).collect(),
-            returns: std::iter::repeat(Type::I64).take(32).collect(),
+            params: std::iter::repeat(Type::I64).take(31)
+                .chain(std::iter::repeat(Type::F64).take(32))
+                .collect(),
+            returns: std::iter::repeat(Type::I64).take(31)
+                .chain(std::iter::repeat(Type::F64).take(32))
+                .collect(),
             shared: true,
         },
     );
@@ -186,7 +191,7 @@ fn lift_and_validate(binary_path: &Path) -> Result<(), String> {
     // Use catch_unwind to handle todo!() panics gracefully
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // Perform the lift
-        // Return types: 31 values for GPRs x1-x31 (x0 is always zero) + PC + trap flag = 33
+        // Return types: 31 GPRs (x1-x31) as I64 + 32 FPRs (f0-f31) as F64 + PC + trap flag = 65
         let _func = rift::compile(
             &mut module,
             vec![], // No user types
@@ -195,7 +200,10 @@ fn lift_and_validate(binary_path: &Path) -> Result<(), String> {
             opts,
             &tune,
             &mut |_, _| {}, // No user preparation
-            std::iter::repeat(Type::I64).take(33),
+            std::iter::repeat(Type::I64).take(31)
+                .chain(std::iter::repeat(Type::F64).take(32))
+                .chain(std::iter::once(Type::I64)) // PC
+                .chain(std::iter::once(Type::I32)), // trap flag
         );
 
         // Use fixup_orders to ensure imports come before function bodies
@@ -619,7 +627,10 @@ fn test_compile_with_hints_callback() {
             opts,
             &tune,
             &mut |_, _| {}, // No user preparation
-            std::iter::repeat(Type::I64).take(33),
+            std::iter::repeat(Type::I64).take(31)
+                .chain(std::iter::repeat(Type::F64).take(32))
+                .chain(std::iter::once(Type::I64)) // PC
+                .chain(std::iter::once(Type::I32)), // trap flag
             &mut |ctx: &mut rift::HintCallbackContext| {
                 // Callback is invoked for each HINT
                 collected_hints.push(ctx.hint.clone());
