@@ -311,6 +311,45 @@ impl Tunables {
         })
     }
 }
+
+/// NaN-box a single-precision floating-point value for storage in a 64-bit FPR.
+/// 
+/// RISC-V Specification Quote:
+/// "When multiple floating-point precisions are supported, then valid values of narrower n-bit
+/// types, n < FLEN, are represented in the lower n bits of an FLEN-bit NaN value, in a process
+/// termed NaN-boxing. The upper bits of a valid NaN-boxed value must be all 1s."
+/// 
+/// Implementation: F32 -> I32 (reinterpret) -> I64 (zero extend) -> OR with 0xFFFFFFFF_00000000 -> F64 (reinterpret)
+fn nan_box_f32(f: &mut FunctionBody, block: Block, val: Value) -> Value {
+    // Reinterpret F32 as I32
+    let i32_val = f.add_op(block, Operator::I32ReinterpretF32, &[val], &[Type::I32]);
+    // Zero-extend I32 to I64
+    let i64_val = f.add_op(block, Operator::I64ExtendI32U, &[i32_val], &[Type::I64]);
+    // OR with upper 32 bits set to all 1s (NaN-boxing)
+    let nan_box_mask = f.add_op(block, Operator::I64Const { value: 0xFFFFFFFF_00000000 }, &[], &[Type::I64]);
+    let boxed = f.add_op(block, Operator::I64Or, &[i64_val, nan_box_mask], &[Type::I64]);
+    // Reinterpret as F64
+    f.add_op(block, Operator::F64ReinterpretI64, &[boxed], &[Type::F64])
+}
+
+/// Unbox a single-precision floating-point value from a 64-bit FPR.
+/// 
+/// RISC-V Specification Quote:
+/// "If the value is not a valid NaN-boxed value, the value is treated as if it were the
+/// canonical quiet NaN."
+/// 
+/// Implementation: F64 -> I64 (reinterpret) -> I32 (wrap/extract low 32 bits) -> F32 (reinterpret)
+/// Note: For simplicity, we extract the lower 32 bits directly. A full implementation would
+/// check if the upper 32 bits are all 1s and return canonical NaN if not.
+fn nan_unbox_to_f32(f: &mut FunctionBody, block: Block, val: Value) -> Value {
+    // Reinterpret F64 as I64
+    let i64_val = f.add_op(block, Operator::I64ReinterpretF64, &[val], &[Type::I64]);
+    // Wrap/extract lower 32 bits (I64 -> I32)
+    let i32_val = f.add_op(block, Operator::I32WrapI64, &[i64_val], &[Type::I32]);
+    // Reinterpret as F32
+    f.add_op(block, Operator::F32ReinterpretI32, &[i32_val], &[Type::F32])
+}
+
 #[derive(Clone, Copy)]
 struct RiscVContext {
     block: Block,
@@ -744,7 +783,7 @@ fn compile_one(
                             // floating-point register that supports wider formats, the value
                             // is NaN-boxed according to the NaN-boxing rules."
                             let val = f.add_op(ctx.block, Operator::F32Load { memory: MemoryArg { offset: 0, align: 2, memory } }, &[addr], &[Type::F32]);
-                            let val = f.add_op(ctx.block, Operator::F64PromoteF32, &[val], &[Type::F64]);
+                            let val = nan_box_f32(f, ctx.block, val);
                             r.put_f(dest, val);
                             fallthrough!()
                         },
@@ -759,7 +798,7 @@ fn compile_one(
                             let addr = ctx.opts.map(module, f, ctx.block, addr, &mut r.user);
                             // Demote 64-bit value to 32-bit for store
                             let val = r.get_f(src);
-                            let val = f.add_op(ctx.block, Operator::F32DemoteF64, &[val], &[Type::F32]);
+                            let val = nan_unbox_to_f32(f, ctx.block, val);
                             f.add_op(ctx.block, Operator::F32Store { memory: MemoryArg { offset: 0, align: 2, memory } }, &[addr, val], &[]);
                             fallthrough!()
                         },
@@ -772,10 +811,10 @@ fn compile_one(
                             let s1 = r.get_f(src1);
                             let s2 = r.get_f(src2);
                             // Demote to F32, compute, promote back
-                            let s1 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s1], &[Type::F32]);
-                            let s2 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s2], &[Type::F32]);
+                            let s1 = nan_unbox_to_f32(f, ctx.block, s1);
+                            let s2 = nan_unbox_to_f32(f, ctx.block, s2);
                             let result = f.add_op(ctx.block, Operator::F32Add, &[s1, s2], &[Type::F32]);
-                            let result = f.add_op(ctx.block, Operator::F64PromoteF32, &[result], &[Type::F64]);
+                            let result = nan_box_f32(f, ctx.block, result);
                             r.put_f(dest, result);
                             fallthrough!()
                         },
@@ -784,10 +823,10 @@ fn compile_one(
                         Inst::FsubS { rm: _, dest, src1, src2 } => {
                             let s1 = r.get_f(src1);
                             let s2 = r.get_f(src2);
-                            let s1 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s1], &[Type::F32]);
-                            let s2 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s2], &[Type::F32]);
+                            let s1 = nan_unbox_to_f32(f, ctx.block, s1);
+                            let s2 = nan_unbox_to_f32(f, ctx.block, s2);
                             let result = f.add_op(ctx.block, Operator::F32Sub, &[s1, s2], &[Type::F32]);
-                            let result = f.add_op(ctx.block, Operator::F64PromoteF32, &[result], &[Type::F64]);
+                            let result = nan_box_f32(f, ctx.block, result);
                             r.put_f(dest, result);
                             fallthrough!()
                         },
@@ -796,10 +835,10 @@ fn compile_one(
                         Inst::FmulS { rm: _, dest, src1, src2 } => {
                             let s1 = r.get_f(src1);
                             let s2 = r.get_f(src2);
-                            let s1 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s1], &[Type::F32]);
-                            let s2 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s2], &[Type::F32]);
+                            let s1 = nan_unbox_to_f32(f, ctx.block, s1);
+                            let s2 = nan_unbox_to_f32(f, ctx.block, s2);
                             let result = f.add_op(ctx.block, Operator::F32Mul, &[s1, s2], &[Type::F32]);
-                            let result = f.add_op(ctx.block, Operator::F64PromoteF32, &[result], &[Type::F64]);
+                            let result = nan_box_f32(f, ctx.block, result);
                             r.put_f(dest, result);
                             fallthrough!()
                         },
@@ -808,10 +847,10 @@ fn compile_one(
                         Inst::FdivS { rm: _, dest, src1, src2 } => {
                             let s1 = r.get_f(src1);
                             let s2 = r.get_f(src2);
-                            let s1 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s1], &[Type::F32]);
-                            let s2 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s2], &[Type::F32]);
+                            let s1 = nan_unbox_to_f32(f, ctx.block, s1);
+                            let s2 = nan_unbox_to_f32(f, ctx.block, s2);
                             let result = f.add_op(ctx.block, Operator::F32Div, &[s1, s2], &[Type::F32]);
-                            let result = f.add_op(ctx.block, Operator::F64PromoteF32, &[result], &[Type::F64]);
+                            let result = nan_box_f32(f, ctx.block, result);
                             r.put_f(dest, result);
                             fallthrough!()
                         },
@@ -821,9 +860,9 @@ fn compile_one(
                         // "Floating-point square root is encoded with rs2=0."
                         Inst::FsqrtS { rm: _, dest, src } => {
                             let s = r.get_f(src);
-                            let s = f.add_op(ctx.block, Operator::F32DemoteF64, &[s], &[Type::F32]);
+                            let s = nan_unbox_to_f32(f, ctx.block, s);
                             let result = f.add_op(ctx.block, Operator::F32Sqrt, &[s], &[Type::F32]);
-                            let result = f.add_op(ctx.block, Operator::F64PromoteF32, &[result], &[Type::F64]);
+                            let result = nan_box_f32(f, ctx.block, result);
                             r.put_f(dest, result);
                             fallthrough!()
                         },
@@ -837,10 +876,10 @@ fn compile_one(
                         Inst::FminS { dest, src1, src2 } => {
                             let s1 = r.get_f(src1);
                             let s2 = r.get_f(src2);
-                            let s1 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s1], &[Type::F32]);
-                            let s2 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s2], &[Type::F32]);
+                            let s1 = nan_unbox_to_f32(f, ctx.block, s1);
+                            let s2 = nan_unbox_to_f32(f, ctx.block, s2);
                             let result = f.add_op(ctx.block, Operator::F32Min, &[s1, s2], &[Type::F32]);
-                            let result = f.add_op(ctx.block, Operator::F64PromoteF32, &[result], &[Type::F64]);
+                            let result = nan_box_f32(f, ctx.block, result);
                             r.put_f(dest, result);
                             fallthrough!()
                         },
@@ -849,10 +888,10 @@ fn compile_one(
                         Inst::FmaxS { dest, src1, src2 } => {
                             let s1 = r.get_f(src1);
                             let s2 = r.get_f(src2);
-                            let s1 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s1], &[Type::F32]);
-                            let s2 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s2], &[Type::F32]);
+                            let s1 = nan_unbox_to_f32(f, ctx.block, s1);
+                            let s2 = nan_unbox_to_f32(f, ctx.block, s2);
                             let result = f.add_op(ctx.block, Operator::F32Max, &[s1, s2], &[Type::F32]);
-                            let result = f.add_op(ctx.block, Operator::F64PromoteF32, &[result], &[Type::F64]);
+                            let result = nan_box_f32(f, ctx.block, result);
                             r.put_f(dest, result);
                             fallthrough!()
                         },
@@ -865,10 +904,10 @@ fn compile_one(
                         Inst::FsgnjS { dest, src1, src2 } => {
                             let s1 = r.get_f(src1);
                             let s2 = r.get_f(src2);
-                            let s1 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s1], &[Type::F32]);
-                            let s2 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s2], &[Type::F32]);
+                            let s1 = nan_unbox_to_f32(f, ctx.block, s1);
+                            let s2 = nan_unbox_to_f32(f, ctx.block, s2);
                             let result = f.add_op(ctx.block, Operator::F32Copysign, &[s1, s2], &[Type::F32]);
-                            let result = f.add_op(ctx.block, Operator::F64PromoteF32, &[result], &[Type::F64]);
+                            let result = nan_box_f32(f, ctx.block, result);
                             r.put_f(dest, result);
                             fallthrough!()
                         },
@@ -879,12 +918,12 @@ fn compile_one(
                         Inst::FsgnjnS { dest, src1, src2 } => {
                             let s1 = r.get_f(src1);
                             let s2 = r.get_f(src2);
-                            let s1 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s1], &[Type::F32]);
-                            let s2 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s2], &[Type::F32]);
+                            let s1 = nan_unbox_to_f32(f, ctx.block, s1);
+                            let s2 = nan_unbox_to_f32(f, ctx.block, s2);
                             // Negate src2 to flip its sign, then copysign
                             let s2_neg = f.add_op(ctx.block, Operator::F32Neg, &[s2], &[Type::F32]);
                             let result = f.add_op(ctx.block, Operator::F32Copysign, &[s1, s2_neg], &[Type::F32]);
-                            let result = f.add_op(ctx.block, Operator::F64PromoteF32, &[result], &[Type::F64]);
+                            let result = nan_box_f32(f, ctx.block, result);
                             r.put_f(dest, result);
                             fallthrough!()
                         },
@@ -914,8 +953,8 @@ fn compile_one(
                         Inst::FeqS { dest, src1, src2 } => {
                             let s1 = r.get_f(src1);
                             let s2 = r.get_f(src2);
-                            let s1 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s1], &[Type::F32]);
-                            let s2 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s2], &[Type::F32]);
+                            let s1 = nan_unbox_to_f32(f, ctx.block, s1);
+                            let s2 = nan_unbox_to_f32(f, ctx.block, s2);
                             let cmp = f.add_op(ctx.block, Operator::F32Eq, &[s1, s2], &[Type::I32]);
                             let result = f.add_op(ctx.block, Operator::I64ExtendI32U, &[cmp], &[Type::I64]);
                             r.put(dest, result);
@@ -930,8 +969,8 @@ fn compile_one(
                         Inst::FltS { dest, src1, src2 } => {
                             let s1 = r.get_f(src1);
                             let s2 = r.get_f(src2);
-                            let s1 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s1], &[Type::F32]);
-                            let s2 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s2], &[Type::F32]);
+                            let s1 = nan_unbox_to_f32(f, ctx.block, s1);
+                            let s2 = nan_unbox_to_f32(f, ctx.block, s2);
                             let cmp = f.add_op(ctx.block, Operator::F32Lt, &[s1, s2], &[Type::I32]);
                             let result = f.add_op(ctx.block, Operator::I64ExtendI32U, &[cmp], &[Type::I64]);
                             r.put(dest, result);
@@ -942,8 +981,8 @@ fn compile_one(
                         Inst::FleS { dest, src1, src2 } => {
                             let s1 = r.get_f(src1);
                             let s2 = r.get_f(src2);
-                            let s1 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s1], &[Type::F32]);
-                            let s2 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s2], &[Type::F32]);
+                            let s1 = nan_unbox_to_f32(f, ctx.block, s1);
+                            let s2 = nan_unbox_to_f32(f, ctx.block, s2);
                             let cmp = f.add_op(ctx.block, Operator::F32Le, &[s1, s2], &[Type::I32]);
                             let result = f.add_op(ctx.block, Operator::I64ExtendI32U, &[cmp], &[Type::I64]);
                             r.put(dest, result);
@@ -956,7 +995,7 @@ fn compile_one(
                         // instructions are encoded in the OP-FP major opcode space."
                         Inst::FcvtWS { rm: _, dest, src } => {
                             let s = r.get_f(src);
-                            let s = f.add_op(ctx.block, Operator::F32DemoteF64, &[s], &[Type::F32]);
+                            let s = nan_unbox_to_f32(f, ctx.block, s);
                             let result = f.add_op(ctx.block, Operator::I32TruncF32S, &[s], &[Type::I32]);
                             let result = f.add_op(ctx.block, Operator::I64ExtendI32S, &[result], &[Type::I64]);
                             r.put(dest, result);
@@ -966,7 +1005,7 @@ fn compile_one(
                         // FCVT.WU.S: Convert Single to Unsigned Word
                         Inst::FcvtWuS { rm: _, dest, src } => {
                             let s = r.get_f(src);
-                            let s = f.add_op(ctx.block, Operator::F32DemoteF64, &[s], &[Type::F32]);
+                            let s = nan_unbox_to_f32(f, ctx.block, s);
                             let result = f.add_op(ctx.block, Operator::I32TruncF32U, &[s], &[Type::I32]);
                             let result = f.add_op(ctx.block, Operator::I64ExtendI32U, &[result], &[Type::I64]);
                             r.put(dest, result);
@@ -978,7 +1017,7 @@ fn compile_one(
                             let s = r.get(f, ctx.block, src);
                             let s = f.add_op(ctx.block, Operator::I32WrapI64, &[s], &[Type::I32]);
                             let result = f.add_op(ctx.block, Operator::F32ConvertI32S, &[s], &[Type::F32]);
-                            let result = f.add_op(ctx.block, Operator::F64PromoteF32, &[result], &[Type::F64]);
+                            let result = nan_box_f32(f, ctx.block, result);
                             r.put_f(dest, result);
                             fallthrough!()
                         },
@@ -988,7 +1027,7 @@ fn compile_one(
                             let s = r.get(f, ctx.block, src);
                             let s = f.add_op(ctx.block, Operator::I32WrapI64, &[s], &[Type::I32]);
                             let result = f.add_op(ctx.block, Operator::F32ConvertI32U, &[s], &[Type::F32]);
-                            let result = f.add_op(ctx.block, Operator::F64PromoteF32, &[result], &[Type::F64]);
+                            let result = nan_box_f32(f, ctx.block, result);
                             r.put_f(dest, result);
                             fallthrough!()
                         },
@@ -1000,7 +1039,7 @@ fn compile_one(
                         // of integer register rd."
                         Inst::FmvXW { dest, src } => {
                             let s = r.get_f(src);
-                            let s = f.add_op(ctx.block, Operator::F32DemoteF64, &[s], &[Type::F32]);
+                            let s = nan_unbox_to_f32(f, ctx.block, s);
                             let result = f.add_op(ctx.block, Operator::I32ReinterpretF32, &[s], &[Type::I32]);
                             // Sign-extend to 64 bits (per RV64F spec)
                             let result = f.add_op(ctx.block, Operator::I64ExtendI32S, &[result], &[Type::I64]);
@@ -1017,7 +1056,7 @@ fn compile_one(
                             let s = r.get(f, ctx.block, src);
                             let s = f.add_op(ctx.block, Operator::I32WrapI64, &[s], &[Type::I32]);
                             let result = f.add_op(ctx.block, Operator::F32ReinterpretI32, &[s], &[Type::F32]);
-                            let result = f.add_op(ctx.block, Operator::F64PromoteF32, &[result], &[Type::F64]);
+                            let result = nan_box_f32(f, ctx.block, result);
                             r.put_f(dest, result);
                             fallthrough!()
                         },
@@ -1050,9 +1089,9 @@ fn compile_one(
                             let s1 = r.get_f(src1);
                             let s2 = r.get_f(src2);
                             let s3 = r.get_f(src3);
-                            let s1 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s1], &[Type::F32]);
-                            let s2 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s2], &[Type::F32]);
-                            let s3 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s3], &[Type::F32]);
+                            let s1 = nan_unbox_to_f32(f, ctx.block, s1);
+                            let s2 = nan_unbox_to_f32(f, ctx.block, s2);
+                            let s3 = nan_unbox_to_f32(f, ctx.block, s3);
                             // Note: WebAssembly doesn't have fused multiply-add, so we use separate
                             // multiply and add operations. This may produce slightly different results
                             // than a true FMA due to intermediate rounding (one rounding vs none).
@@ -1061,7 +1100,7 @@ fn compile_one(
                             // with a single rounding."
                             let mul = f.add_op(ctx.block, Operator::F32Mul, &[s1, s2], &[Type::F32]);
                             let result = f.add_op(ctx.block, Operator::F32Add, &[mul, s3], &[Type::F32]);
-                            let result = f.add_op(ctx.block, Operator::F64PromoteF32, &[result], &[Type::F64]);
+                            let result = nan_box_f32(f, ctx.block, result);
                             r.put_f(dest, result);
                             fallthrough!()
                         },
@@ -1071,12 +1110,12 @@ fn compile_one(
                             let s1 = r.get_f(src1);
                             let s2 = r.get_f(src2);
                             let s3 = r.get_f(src3);
-                            let s1 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s1], &[Type::F32]);
-                            let s2 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s2], &[Type::F32]);
-                            let s3 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s3], &[Type::F32]);
+                            let s1 = nan_unbox_to_f32(f, ctx.block, s1);
+                            let s2 = nan_unbox_to_f32(f, ctx.block, s2);
+                            let s3 = nan_unbox_to_f32(f, ctx.block, s3);
                             let mul = f.add_op(ctx.block, Operator::F32Mul, &[s1, s2], &[Type::F32]);
                             let result = f.add_op(ctx.block, Operator::F32Sub, &[mul, s3], &[Type::F32]);
-                            let result = f.add_op(ctx.block, Operator::F64PromoteF32, &[result], &[Type::F64]);
+                            let result = nan_box_f32(f, ctx.block, result);
                             r.put_f(dest, result);
                             fallthrough!()
                         },
@@ -1086,13 +1125,13 @@ fn compile_one(
                             let s1 = r.get_f(src1);
                             let s2 = r.get_f(src2);
                             let s3 = r.get_f(src3);
-                            let s1 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s1], &[Type::F32]);
-                            let s2 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s2], &[Type::F32]);
-                            let s3 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s3], &[Type::F32]);
+                            let s1 = nan_unbox_to_f32(f, ctx.block, s1);
+                            let s2 = nan_unbox_to_f32(f, ctx.block, s2);
+                            let s3 = nan_unbox_to_f32(f, ctx.block, s3);
                             let mul = f.add_op(ctx.block, Operator::F32Mul, &[s1, s2], &[Type::F32]);
                             let neg_mul = f.add_op(ctx.block, Operator::F32Neg, &[mul], &[Type::F32]);
                             let result = f.add_op(ctx.block, Operator::F32Add, &[neg_mul, s3], &[Type::F32]);
-                            let result = f.add_op(ctx.block, Operator::F64PromoteF32, &[result], &[Type::F64]);
+                            let result = nan_box_f32(f, ctx.block, result);
                             r.put_f(dest, result);
                             fallthrough!()
                         },
@@ -1102,13 +1141,13 @@ fn compile_one(
                             let s1 = r.get_f(src1);
                             let s2 = r.get_f(src2);
                             let s3 = r.get_f(src3);
-                            let s1 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s1], &[Type::F32]);
-                            let s2 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s2], &[Type::F32]);
-                            let s3 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s3], &[Type::F32]);
+                            let s1 = nan_unbox_to_f32(f, ctx.block, s1);
+                            let s2 = nan_unbox_to_f32(f, ctx.block, s2);
+                            let s3 = nan_unbox_to_f32(f, ctx.block, s3);
                             let mul = f.add_op(ctx.block, Operator::F32Mul, &[s1, s2], &[Type::F32]);
                             let neg_mul = f.add_op(ctx.block, Operator::F32Neg, &[mul], &[Type::F32]);
                             let result = f.add_op(ctx.block, Operator::F32Sub, &[neg_mul, s3], &[Type::F32]);
-                            let result = f.add_op(ctx.block, Operator::F64PromoteF32, &[result], &[Type::F64]);
+                            let result = nan_box_f32(f, ctx.block, result);
                             r.put_f(dest, result);
                             fallthrough!()
                         },
@@ -1281,9 +1320,9 @@ fn compile_one(
                         // single precision."
                         Inst::FcvtSD { rm: _, dest, src } => {
                             let s = r.get_f(src);
-                            // Demote to single, then promote back (with NaN-boxing)
+                            // Convert double to single using F32DemoteF64, then NaN-box the result
                             let result = f.add_op(ctx.block, Operator::F32DemoteF64, &[s], &[Type::F32]);
-                            let result = f.add_op(ctx.block, Operator::F64PromoteF32, &[result], &[Type::F64]);
+                            let result = nan_box_f32(f, ctx.block, result);
                             r.put_f(dest, result);
                             fallthrough!()
                         },
@@ -1294,8 +1333,8 @@ fn compile_one(
                         // double precision."
                         Inst::FcvtDS { rm: _, dest, src } => {
                             let s = r.get_f(src);
-                            // Already stored as F64, but may need to interpret as single first
-                            let s32 = f.add_op(ctx.block, Operator::F32DemoteF64, &[s], &[Type::F32]);
+                            // Unbox the single-precision value, then promote to double
+                            let s32 = nan_unbox_to_f32(f, ctx.block, s);
                             let result = f.add_op(ctx.block, Operator::F64PromoteF32, &[s32], &[Type::F64]);
                             r.put_f(dest, result);
                             fallthrough!()
@@ -1404,7 +1443,7 @@ fn compile_one(
                         // FCVT.L.S: Convert Single to Signed Long (RV64F)
                         Inst::FcvtLS { rm: _, dest, src } => {
                             let s = r.get_f(src);
-                            let s = f.add_op(ctx.block, Operator::F32DemoteF64, &[s], &[Type::F32]);
+                            let s = nan_unbox_to_f32(f, ctx.block, s);
                             let result = f.add_op(ctx.block, Operator::I64TruncF32S, &[s], &[Type::I64]);
                             r.put(dest, result);
                             fallthrough!()
@@ -1413,7 +1452,7 @@ fn compile_one(
                         // FCVT.LU.S: Convert Single to Unsigned Long (RV64F)
                         Inst::FcvtLuS { rm: _, dest, src } => {
                             let s = r.get_f(src);
-                            let s = f.add_op(ctx.block, Operator::F32DemoteF64, &[s], &[Type::F32]);
+                            let s = nan_unbox_to_f32(f, ctx.block, s);
                             let result = f.add_op(ctx.block, Operator::I64TruncF32U, &[s], &[Type::I64]);
                             r.put(dest, result);
                             fallthrough!()
@@ -1423,7 +1462,7 @@ fn compile_one(
                         Inst::FcvtSL { rm: _, dest, src } => {
                             let s = r.get(f, ctx.block, src);
                             let result = f.add_op(ctx.block, Operator::F32ConvertI64S, &[s], &[Type::F32]);
-                            let result = f.add_op(ctx.block, Operator::F64PromoteF32, &[result], &[Type::F64]);
+                            let result = nan_box_f32(f, ctx.block, result);
                             r.put_f(dest, result);
                             fallthrough!()
                         },
@@ -1432,7 +1471,7 @@ fn compile_one(
                         Inst::FcvtSLu { rm: _, dest, src } => {
                             let s = r.get(f, ctx.block, src);
                             let result = f.add_op(ctx.block, Operator::F32ConvertI64U, &[s], &[Type::F32]);
-                            let result = f.add_op(ctx.block, Operator::F64PromoteF32, &[result], &[Type::F64]);
+                            let result = nan_box_f32(f, ctx.block, result);
                             r.put_f(dest, result);
                             fallthrough!()
                         },
