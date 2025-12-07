@@ -2,30 +2,47 @@
 
 ## Overview
 
-This paging system provides a software-based virtual memory mechanism for RISC-V backends. It translates RISC-V virtual addresses to physical addresses using a configurable page table, enabling memory isolation, address space management, and efficient memory mapping.
+This paging system provides a software-based virtual memory mechanism for RISC-V backends. It translates RISC-V virtual addresses to physical addresses using a configurable multi-level page table, enabling memory isolation, address space management, and efficient memory mapping.
 
 ## Architecture
 
 ### Page Structure
 
-- **Page Size**: 4096 bytes (4 KiB) - standard for most architectures
-- **Page Alignment**: All pages are aligned to 4096-byte boundaries
-- **Page Table**: Maps virtual page numbers to physical page base addresses
+- **Page Size**: 65536 bytes (64 KiB) - optimized for sparse address spaces
+- **Page Alignment**: All pages are aligned to 64KB boundaries
+- **Page Table**: Multi-level table structure with 16-bit indices at each level
 
 ### Address Translation
 
-A virtual address is split into two components:
+A virtual address is split into multiple components for multi-level paging:
 
 ```
 Virtual Address (64-bit)
-├─ Virtual Page Number (VPN): bits [63:12] - upper 52 bits
-└─ Page Offset: bits [11:0] - lower 12 bits
+├─ Level 3 Index: bits [63:48] - 16 bits (top level)
+├─ Level 2 Index: bits [47:32] - 16 bits
+├─ Level 1 Index: bits [31:16] - 16 bits  
+└─ Page Offset:    bits [15:0]  - 16 bits (64KB page)
 ```
 
-Translation process:
-1. Extract VPN from virtual address: `vpn = vaddr >> 12`
-2. Look up physical page base in page table: `phys_page = page_table[vpn]`
-3. Combine with offset: `phys_addr = phys_page + (vaddr & 0xFFF)`
+### Multi-Level Translation Process
+
+For a 3-level page table:
+1. Extract Level 3 index: `l3_idx = (vaddr >> 48) & 0xFFFF`
+2. Load Level 3 table: `l2_table = l3_table[l3_idx]`
+3. Extract Level 2 index: `l2_idx = (vaddr >> 32) & 0xFFFF`
+4. Load Level 2 table: `l1_table = l2_table[l2_idx]`
+5. Extract Level 1 index: `l1_idx = (vaddr >> 16) & 0xFFFF`
+6. Load physical page base: `phys_page = l1_table[l1_idx]`
+7. Extract page offset: `offset = vaddr & 0xFFFF`
+8. Compute physical address: `phys_addr = phys_page + offset`
+
+### Single-Level Translation (Flat)
+
+For simple use cases:
+1. Extract page number: `page_num = vaddr >> 16`
+2. Look up physical page base: `phys_page = page_table[page_num]`
+3. Extract offset: `offset = vaddr & 0xFFFF`
+4. Compute physical address: `phys_addr = phys_page + offset`
 
 ### Configuration
 

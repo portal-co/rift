@@ -1550,6 +1550,149 @@ fn compile_one(
     });
     // fallthrough!()
 }
+
+/// Standard page table mapper for 64KB single-level paging
+///
+/// This helper generates WebAssembly code to translate virtual addresses using a flat page table.
+/// The page table is stored in WebAssembly memory at `page_table_base`.
+///
+/// # Page Table Format
+/// - Each entry is 8 bytes (i64) containing the physical page base address
+/// - Entry address = page_table_base + (page_num * 8)
+/// - Page number = vaddr >> 16 (bits 63:16)
+/// - Page offset = vaddr & 0xFFFF (bits 15:0)
+///
+/// # Arguments
+/// - `module`: WebAssembly module
+/// - `f`: Function body being built
+/// - `block`: Current block
+/// - `vaddr`: Virtual address value
+/// - `page_table_base`: Base address of page table in WebAssembly memory
+/// - `memory`: Memory index to use for loads
+///
+/// # Returns
+/// Physical address value
+pub fn standard_page_table_mapper(
+    module: &mut Module,
+    f: &mut FunctionBody,
+    block: Block,
+    vaddr: Value,
+    page_table_base: u64,
+    memory: Memory,
+) -> Value {
+    // Extract page number: vaddr >> 16
+    let shift_16 = f.add_op(block, Operator::I64Const { value: 16 }, &[], &[Type::I64]);
+    let page_num = f.add_op(block, Operator::I64ShrU, &[vaddr, shift_16], &[Type::I64]);
+    
+    // Multiply page_num by 8 (size of u64 entry)
+    let shift_3 = f.add_op(block, Operator::I64Const { value: 3 }, &[], &[Type::I64]);
+    let entry_offset = f.add_op(block, Operator::I64Shl, &[page_num, shift_3], &[Type::I64]);
+    
+    // Add page table base address
+    let pt_base = f.add_op(block, Operator::I64Const { value: page_table_base }, &[], &[Type::I64]);
+    let entry_addr = f.add_op(block, Operator::I64Add, &[pt_base, entry_offset], &[Type::I64]);
+    
+    // Load physical page base from page table
+    let phys_page = f.add_op(
+        block,
+        Operator::I64Load {
+            memory: MemoryArg {
+                offset: 0,
+                align: 3,
+                memory,
+            }
+        },
+        &[entry_addr],
+        &[Type::I64]
+    );
+    
+    // Extract page offset: vaddr & 0xFFFF
+    let mask = f.add_op(block, Operator::I64Const { value: 0xFFFF }, &[], &[Type::I64]);
+    let page_offset = f.add_op(block, Operator::I64And, &[vaddr, mask], &[Type::I64]);
+    
+    // Combine: phys_page + page_offset
+    f.add_op(block, Operator::I64Add, &[phys_page, page_offset], &[Type::I64])
+}
+
+/// Multi-level page table mapper for 64KB pages
+///
+/// This helper generates WebAssembly code for a 3-level page table structure.
+/// Each level uses 16-bit indices, supporting the full 64-bit address space.
+///
+/// # Page Table Structure
+/// - Level 3 (top): Indexed by bits [63:48]
+/// - Level 2: Indexed by bits [47:32]
+/// - Level 1 (leaf): Indexed by bits [31:16], contains physical page bases
+/// - Page offset: bits [15:0]
+///
+/// # Arguments
+/// - `module`: WebAssembly module
+/// - `f`: Function body being built
+/// - `block`: Current block
+/// - `vaddr`: Virtual address value
+/// - `l3_table_base`: Base address of level 3 page table
+/// - `memory`: Memory index to use for loads
+///
+/// # Returns
+/// Physical address value
+pub fn multilevel_page_table_mapper(
+    module: &mut Module,
+    f: &mut FunctionBody,
+    block: Block,
+    vaddr: Value,
+    l3_table_base: u64,
+    memory: Memory,
+) -> Value {
+    // Helper to extract a 16-bit field from vaddr
+    let extract_16bit = |f: &mut FunctionBody, block, val: Value, shift_amt: u64| -> Value {
+        let shift = f.add_op(block, Operator::I64Const { value: shift_amt }, &[], &[Type::I64]);
+        let shifted = f.add_op(block, Operator::I64ShrU, &[val, shift], &[Type::I64]);
+        let mask = f.add_op(block, Operator::I64Const { value: 0xFFFF }, &[], &[Type::I64]);
+        f.add_op(block, Operator::I64And, &[shifted, mask], &[Type::I64])
+    };
+    
+    // Level 3: bits [63:48]
+    let l3_idx = extract_16bit(f, block, vaddr, 48);
+    let shift_3 = f.add_op(block, Operator::I64Const { value: 3 }, &[], &[Type::I64]);
+    let l3_offset = f.add_op(block, Operator::I64Shl, &[l3_idx, shift_3], &[Type::I64]);
+    let l3_base = f.add_op(block, Operator::I64Const { value: l3_table_base }, &[], &[Type::I64]);
+    let l3_entry_addr = f.add_op(block, Operator::I64Add, &[l3_base, l3_offset], &[Type::I64]);
+    let l2_table_base = f.add_op(
+        block,
+        Operator::I64Load { memory: MemoryArg { offset: 0, align: 3, memory } },
+        &[l3_entry_addr],
+        &[Type::I64]
+    );
+    
+    // Level 2: bits [47:32]
+    let l2_idx = extract_16bit(f, block, vaddr, 32);
+    let l2_offset = f.add_op(block, Operator::I64Shl, &[l2_idx, shift_3], &[Type::I64]);
+    let l2_entry_addr = f.add_op(block, Operator::I64Add, &[l2_table_base, l2_offset], &[Type::I64]);
+    let l1_table_base = f.add_op(
+        block,
+        Operator::I64Load { memory: MemoryArg { offset: 0, align: 3, memory } },
+        &[l2_entry_addr],
+        &[Type::I64]
+    );
+    
+    // Level 1: bits [31:16]
+    let l1_idx = extract_16bit(f, block, vaddr, 16);
+    let l1_offset = f.add_op(block, Operator::I64Shl, &[l1_idx, shift_3], &[Type::I64]);
+    let l1_entry_addr = f.add_op(block, Operator::I64Add, &[l1_table_base, l1_offset], &[Type::I64]);
+    let phys_page = f.add_op(
+        block,
+        Operator::I64Load { memory: MemoryArg { offset: 0, align: 3, memory } },
+        &[l1_entry_addr],
+        &[Type::I64]
+    );
+    
+    // Page offset: bits [15:0]
+    let page_offset = extract_16bit(f, block, vaddr, 0);
+    
+    // Combine: phys_page + page_offset
+    f.add_op(block, Operator::I64Add, &[phys_page, page_offset], &[Type::I64])
+}
+
 #[derive(Clone, Copy)]
 pub struct Opts {
     pub mem: Memory,
