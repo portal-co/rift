@@ -17,16 +17,26 @@ Uses `Opts.mapper` callback to inject custom address translation into compiled W
 
 **Example:**
 ```rust
-// 64-bit physical addresses (default)
+// With static constant address
 let phys_addr = standard_page_table_mapper(
     module, function, block, vaddr,
-    page_table_base, memory
+    0x1000000u64,  // static constant
+    memory
+);
+
+// With runtime Value (from param, local, or global)
+let pt_base_value = ...; // Value from function parameter or local
+let phys_addr = standard_page_table_mapper(
+    module, function, block, vaddr,
+    pt_base_value,  // runtime value
+    memory
 );
 
 // 32-bit physical addresses (4 GiB limit)
 let phys_addr = standard_page_table_mapper_32(
     module, function, block, vaddr,
-    page_table_base, memory
+    pt_base_value,  // can be Value or u64
+    memory
 );
 ```
 

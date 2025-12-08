@@ -1551,10 +1551,39 @@ fn compile_one(
     // fallthrough!()
 }
 
+/// Helper type for page table base address that can be either a runtime Value or a static constant
+pub enum PageTableBase {
+    /// Runtime value (e.g., from a local, param, or global)
+    Runtime(Value),
+    /// Static constant address
+    Constant(u64),
+}
+
+impl From<Value> for PageTableBase {
+    fn from(v: Value) -> Self {
+        PageTableBase::Runtime(v)
+    }
+}
+
+impl From<u64> for PageTableBase {
+    fn from(c: u64) -> Self {
+        PageTableBase::Constant(c)
+    }
+}
+
+impl PageTableBase {
+    fn to_value(self, f: &mut FunctionBody, block: Block) -> Value {
+        match self {
+            PageTableBase::Runtime(v) => v,
+            PageTableBase::Constant(c) => f.add_op(block, Operator::I64Const { value: c }, &[], &[Type::I64]),
+        }
+    }
+}
+
 /// Standard page table mapper for 64KB single-level paging
 ///
 /// This helper generates WebAssembly code to translate virtual addresses using a flat page table.
-/// The page table is stored in WebAssembly memory at `page_table_base`.
+/// The page table base address can be provided as either a runtime Value or a static constant.
 ///
 /// # Page Table Format
 /// - Each entry is 8 bytes (i64) containing the physical page base address
@@ -1567,7 +1596,7 @@ fn compile_one(
 /// - `f`: Function body being built
 /// - `block`: Current block
 /// - `vaddr`: Virtual address value
-/// - `page_table_base`: Base address of page table in WebAssembly memory
+/// - `page_table_base`: Base address of page table (runtime Value or static u64)
 /// - `memory`: Memory index to use for loads
 ///
 /// # Returns
@@ -1577,9 +1606,11 @@ pub fn standard_page_table_mapper(
     f: &mut FunctionBody,
     block: Block,
     vaddr: Value,
-    page_table_base: u64,
+    page_table_base: impl Into<PageTableBase>,
     memory: Memory,
 ) -> Value {
+    let pt_base_value = page_table_base.into().to_value(f, block);
+    
     // Extract page number: vaddr >> 16
     let shift_16 = f.add_op(block, Operator::I64Const { value: 16 }, &[], &[Type::I64]);
     let page_num = f.add_op(block, Operator::I64ShrU, &[vaddr, shift_16], &[Type::I64]);
@@ -1589,8 +1620,7 @@ pub fn standard_page_table_mapper(
     let entry_offset = f.add_op(block, Operator::I64Shl, &[page_num, shift_3], &[Type::I64]);
     
     // Add page table base address
-    let pt_base = f.add_op(block, Operator::I64Const { value: page_table_base }, &[], &[Type::I64]);
-    let entry_addr = f.add_op(block, Operator::I64Add, &[pt_base, entry_offset], &[Type::I64]);
+    let entry_addr = f.add_op(block, Operator::I64Add, &[pt_base_value, entry_offset], &[Type::I64]);
     
     // Load physical page base from page table
     let phys_page = f.add_op(
@@ -1630,7 +1660,7 @@ pub fn standard_page_table_mapper(
 /// - `f`: Function body being built
 /// - `block`: Current block
 /// - `vaddr`: Virtual address value
-/// - `l3_table_base`: Base address of level 3 page table
+/// - `l3_table_base`: Base address of level 3 page table (runtime Value or static u64)
 /// - `memory`: Memory index to use for loads
 ///
 /// # Returns
@@ -1640,9 +1670,10 @@ pub fn multilevel_page_table_mapper(
     f: &mut FunctionBody,
     block: Block,
     vaddr: Value,
-    l3_table_base: u64,
+    l3_table_base: impl Into<PageTableBase>,
     memory: Memory,
 ) -> Value {
+    let l3_base_value = l3_table_base.into().to_value(f, block);
     // Helper to extract a 16-bit field from vaddr
     let extract_16bit = |f: &mut FunctionBody, block, val: Value, shift_amt: u64| -> Value {
         let shift = f.add_op(block, Operator::I64Const { value: shift_amt }, &[], &[Type::I64]);
@@ -1655,8 +1686,7 @@ pub fn multilevel_page_table_mapper(
     let l3_idx = extract_16bit(f, block, vaddr, 48);
     let shift_3 = f.add_op(block, Operator::I64Const { value: 3 }, &[], &[Type::I64]);
     let l3_offset = f.add_op(block, Operator::I64Shl, &[l3_idx, shift_3], &[Type::I64]);
-    let l3_base = f.add_op(block, Operator::I64Const { value: l3_table_base }, &[], &[Type::I64]);
-    let l3_entry_addr = f.add_op(block, Operator::I64Add, &[l3_base, l3_offset], &[Type::I64]);
+    let l3_entry_addr = f.add_op(block, Operator::I64Add, &[l3_base_value, l3_offset], &[Type::I64]);
     let l2_table_base = f.add_op(
         block,
         Operator::I64Load { memory: MemoryArg { offset: 0, align: 3, memory } },
@@ -1703,7 +1733,7 @@ pub fn multilevel_page_table_mapper(
 /// - `f`: Function body being built
 /// - `block`: Current block
 /// - `vaddr`: Virtual address value (64-bit)
-/// - `page_table_base`: Base address of page table in WebAssembly memory
+/// - `page_table_base`: Base address of page table (runtime Value or static u64)
 /// - `memory`: Memory index to use for loads
 ///
 /// # Returns
@@ -1713,9 +1743,10 @@ pub fn standard_page_table_mapper_32(
     f: &mut FunctionBody,
     block: Block,
     vaddr: Value,
-    page_table_base: u64,
+    page_table_base: impl Into<PageTableBase>,
     memory: Memory,
 ) -> Value {
+    let pt_base_value = page_table_base.into().to_value(f, block);
     // Extract page number: vaddr >> 16
     let shift_16 = f.add_op(block, Operator::I64Const { value: 16 }, &[], &[Type::I64]);
     let page_num = f.add_op(block, Operator::I64ShrU, &[vaddr, shift_16], &[Type::I64]);
@@ -1725,8 +1756,7 @@ pub fn standard_page_table_mapper_32(
     let entry_offset = f.add_op(block, Operator::I64Shl, &[page_num, shift_2], &[Type::I64]);
     
     // Add page table base address
-    let pt_base = f.add_op(block, Operator::I64Const { value: page_table_base }, &[], &[Type::I64]);
-    let entry_addr = f.add_op(block, Operator::I64Add, &[pt_base, entry_offset], &[Type::I64]);
+    let entry_addr = f.add_op(block, Operator::I64Add, &[pt_base_value, entry_offset], &[Type::I64]);
     
     // Load 32-bit physical page base from page table and extend to 64-bit
     let phys_page_32 = f.add_op(
@@ -1761,7 +1791,7 @@ pub fn standard_page_table_mapper_32(
 /// - `f`: Function body being built
 /// - `block`: Current block
 /// - `vaddr`: Virtual address value (64-bit)
-/// - `l3_table_base`: Base address of level 3 page table
+/// - `l3_table_base`: Base address of level 3 page table (runtime Value or static u64)
 /// - `memory`: Memory index to use for loads
 ///
 /// # Returns
@@ -1771,9 +1801,10 @@ pub fn multilevel_page_table_mapper_32(
     f: &mut FunctionBody,
     block: Block,
     vaddr: Value,
-    l3_table_base: u64,
+    l3_table_base: impl Into<PageTableBase>,
     memory: Memory,
 ) -> Value {
+    let l3_base_value = l3_table_base.into().to_value(f, block);
     // Helper to extract a 16-bit field from vaddr
     let extract_16bit = |f: &mut FunctionBody, block, val: Value, shift_amt: u64| -> Value {
         let shift = f.add_op(block, Operator::I64Const { value: shift_amt }, &[], &[Type::I64]);
@@ -1798,8 +1829,7 @@ pub fn multilevel_page_table_mapper_32(
     // Level 3: bits [63:48]
     let l3_idx = extract_16bit(f, block, vaddr, 48);
     let l3_offset = f.add_op(block, Operator::I64Shl, &[l3_idx, shift_2], &[Type::I64]);
-    let l3_base = f.add_op(block, Operator::I64Const { value: l3_table_base }, &[], &[Type::I64]);
-    let l3_entry_addr = f.add_op(block, Operator::I64Add, &[l3_base, l3_offset], &[Type::I64]);
+    let l3_entry_addr = f.add_op(block, Operator::I64Add, &[l3_base_value, l3_offset], &[Type::I64]);
     let l2_table_base = load_u32_extend(f, block, l3_entry_addr);
     
     // Level 2: bits [47:32]
