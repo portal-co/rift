@@ -206,6 +206,8 @@ pub struct Regs {
     pub user: Vec<Value>,
     /// Page table base address (used for memory address translation)
     pub page_table_base: Option<Value>,
+    /// Security directory base address
+    pub security_directory_base: Option<Value>,
 }
 impl Regs {
     pub fn from_args<T>(
@@ -223,6 +225,7 @@ impl Regs {
                 args.next_array()?
             },
             page_table_base: args.next(),
+            security_directory_base: args.next(),
         })
     }
     pub fn to_args(&self) -> impl Iterator<Item = Value> {
@@ -230,6 +233,7 @@ impl Regs {
             .chain(self.gpr.iter())
             .chain(self.fpr.iter())
             .chain(self.page_table_base.iter())
+            .chain(self.security_directory_base.iter())
             .cloned();
     }
     pub fn get(&self, f: &mut FunctionBody, block: Block, Reg(mut i): Reg) -> Value {
@@ -1564,6 +1568,8 @@ pub enum PageTableBase {
     Constant(u64),
     /// Load from Regs.page_table_base field
     FromRegs,
+    /// Load from Regs.security_directory_base field
+    FromRegsSec,
     /// Runtime value from a WebAssembly global variable
     Global(portal_pc_waffle::Global),
 }
@@ -1590,6 +1596,9 @@ impl PageTableBase {
             PageTableBase::FromRegs => {
                 regs.page_table_base.expect("page_table_base not set in Regs")
             }
+            PageTableBase::FromRegsSec => {
+                regs.security_directory_base.expect("security_directory_base not set in Regs")
+            }
             PageTableBase::Global(global_idx) => {
                 f.add_op(block, Operator::GlobalGet { global_index: global_idx }, &[], &[Type::I64])
             }
@@ -1598,104 +1607,62 @@ impl PageTableBase {
 }
 
 /// Standard page table mapper for 64KB single-level paging
-///
-/// This helper generates WebAssembly code to translate virtual addresses using a flat page table.
-/// The page table base address can be provided as either a runtime Value or a static constant.
-///
-/// # Page Table Format
-/// - Each entry is 8 bytes (i64) containing the physical page base address
-/// - Entry address = page_table_base + (page_num * 8)
-/// - Page number = vaddr >> 16 (bits 63:16)
-/// - Page offset = vaddr & 0xFFFF (bits 15:0)
-///
-/// # Arguments
-/// - `module`: WebAssembly module
-/// - `f`: Function body being built
-/// - `block`: Current block
-/// - `vaddr`: Virtual address value
-/// - `page_table_base`: Base address of page table (constant, from Regs, or global)
-/// - `regs`: Register state (needed if page_table_base is FromRegs)
-/// - `memory`: Memory index to use for loads
-///
-/// # Returns
-/// Physical address value
 pub fn standard_page_table_mapper(
     module: &mut Module,
     f: &mut FunctionBody,
     block: Block,
     vaddr: Value,
     page_table_base: impl Into<PageTableBase>,
+    security_directory_base: impl Into<PageTableBase>,
     regs: &Regs,
     memory: Memory,
 ) -> Value {
     let pt_base_value = page_table_base.into().to_value(f, block, regs);
-    
-    // Extract page number: vaddr >> 16
+    let sec_dir_base_value = security_directory_base.into().to_value(f, block, regs);
+
+    // Get page pointer from page table
     let shift_16 = f.add_op(block, Operator::I64Const { value: 16 }, &[], &[Type::I64]);
     let page_num = f.add_op(block, Operator::I64ShrU, &[vaddr, shift_16], &[Type::I64]);
-    
-    // Multiply page_num by 8 (size of u64 entry)
     let shift_3 = f.add_op(block, Operator::I64Const { value: 3 }, &[], &[Type::I64]);
     let entry_offset = f.add_op(block, Operator::I64Shl, &[page_num, shift_3], &[Type::I64]);
-    
-    // Add page table base address
     let entry_addr = f.add_op(block, Operator::I64Add, &[pt_base_value, entry_offset], &[Type::I64]);
+    let page_pointer = f.add_op(block, Operator::I64Load { memory: MemoryArg { offset: 0, align: 3, memory } }, &[entry_addr], &[Type::I64]);
+
+    // Get security index and lower 48 bits of page base
+    let sec_idx_mask = f.add_op(block, Operator::I64Const { value: 0xFFFF }, &[], &[Type::I64]);
+    let sec_idx = f.add_op(block, Operator::I64And, &[page_pointer, sec_idx_mask], &[Type::I64]);
+    let page_base_low48 = f.add_op(block, Operator::I64ShrU, &[page_pointer, shift_16], &[Type::I64]);
+
+    // Get security entry
+    let sec_entry_offset = f.add_op(block, Operator::I64Shl, &[sec_idx, shift_3], &[Type::I64]);
+    let sec_entry_addr = f.add_op(block, Operator::I64Add, &[sec_dir_base_value, sec_entry_offset], &[Type::I64]);
+    let sec_entry = f.add_op(block, Operator::I64Load { memory: MemoryArg { offset: 0, align: 3, memory } }, &[sec_entry_addr], &[Type::I64]);
+
+    // Construct final physical page base
+    let shift_48 = f.add_op(block, Operator::I64Const { value: 48 }, &[], &[Type::I64]);
+    let page_base_top16 = f.add_op(block, Operator::I64ShrU, &[sec_entry, shift_48], &[Type::I64]);
+    let page_base_top = f.add_op(block, Operator::I64Shl, &[page_base_top16, shift_48], &[Type::I64]);
+    let phys_page_base = f.add_op(block, Operator::I64Or, &[page_base_top, page_base_low48], &[Type::I64]);
     
-    // Load physical page base from page table
-    let phys_page = f.add_op(
-        block,
-        Operator::I64Load {
-            memory: MemoryArg {
-                offset: 0,
-                align: 3,
-                memory,
-            }
-        },
-        &[entry_addr],
-        &[Type::I64]
-    );
-    
-    // Extract page offset: vaddr & 0xFFFF
-    let mask = f.add_op(block, Operator::I64Const { value: 0xFFFF }, &[], &[Type::I64]);
-    let page_offset = f.add_op(block, Operator::I64And, &[vaddr, mask], &[Type::I64]);
-    
-    // Combine: phys_page + page_offset
-    f.add_op(block, Operator::I64Add, &[phys_page, page_offset], &[Type::I64])
+    // Combine with page offset
+    let page_offset = f.add_op(block, Operator::I64And, &[vaddr, sec_idx_mask], &[Type::I64]);
+    f.add_op(block, Operator::I64Add, &[phys_page_base, page_offset], &[Type::I64])
 }
 
 /// Multi-level page table mapper for 64KB pages
-///
-/// This helper generates WebAssembly code for a 3-level page table structure.
-/// Each level uses 16-bit indices, supporting the full 64-bit address space.
-///
-/// # Page Table Structure
-/// - Level 3 (top): Indexed by bits [63:48]
-/// - Level 2: Indexed by bits [47:32]
-/// - Level 1 (leaf): Indexed by bits [31:16], contains physical page bases
-/// - Page offset: bits [15:0]
-///
-/// # Arguments
-/// - `module`: WebAssembly module
-/// - `f`: Function body being built
-/// - `block`: Current block
-/// - `vaddr`: Virtual address value
-/// - `l3_table_base`: Base address of level 3 page table (constant, from Regs, or global)
-/// - `regs`: Register state (needed if l3_table_base is FromRegs)
-/// - `memory`: Memory index to use for loads
-///
-/// # Returns
-/// Physical address value
 pub fn multilevel_page_table_mapper(
     module: &mut Module,
     f: &mut FunctionBody,
     block: Block,
     vaddr: Value,
     l3_table_base: impl Into<PageTableBase>,
+    security_directory_base: impl Into<PageTableBase>,
     regs: &Regs,
     memory: Memory,
 ) -> Value {
     let l3_base_value = l3_table_base.into().to_value(f, block, regs);
-    // Helper to extract a 16-bit field from vaddr
+    let sec_dir_base_value = security_directory_base.into().to_value(f, block, regs);
+    
     let extract_16bit = |f: &mut FunctionBody, block, val: Value, shift_amt: u64| -> Value {
         let shift = f.add_op(block, Operator::I64Const { value: shift_amt }, &[], &[Type::I64]);
         let shifted = f.add_op(block, Operator::I64ShrU, &[val, shift], &[Type::I64]);
@@ -1703,134 +1670,105 @@ pub fn multilevel_page_table_mapper(
         f.add_op(block, Operator::I64And, &[shifted, mask], &[Type::I64])
     };
     
-    // Level 3: bits [63:48]
-    let l3_idx = extract_16bit(f, block, vaddr, 48);
     let shift_3 = f.add_op(block, Operator::I64Const { value: 3 }, &[], &[Type::I64]);
+    
+    // L3
+    let l3_idx = extract_16bit(f, block, vaddr, 48);
     let l3_offset = f.add_op(block, Operator::I64Shl, &[l3_idx, shift_3], &[Type::I64]);
     let l3_entry_addr = f.add_op(block, Operator::I64Add, &[l3_base_value, l3_offset], &[Type::I64]);
-    let l2_table_base = f.add_op(
-        block,
-        Operator::I64Load { memory: MemoryArg { offset: 0, align: 3, memory } },
-        &[l3_entry_addr],
-        &[Type::I64]
-    );
+    let l2_table_base = f.add_op(block, Operator::I64Load { memory: MemoryArg { offset: 0, align: 3, memory } }, &[l3_entry_addr], &[Type::I64]);
     
-    // Level 2: bits [47:32]
+    // L2
     let l2_idx = extract_16bit(f, block, vaddr, 32);
     let l2_offset = f.add_op(block, Operator::I64Shl, &[l2_idx, shift_3], &[Type::I64]);
     let l2_entry_addr = f.add_op(block, Operator::I64Add, &[l2_table_base, l2_offset], &[Type::I64]);
-    let l1_table_base = f.add_op(
-        block,
-        Operator::I64Load { memory: MemoryArg { offset: 0, align: 3, memory } },
-        &[l2_entry_addr],
-        &[Type::I64]
-    );
+    let l1_table_base = f.add_op(block, Operator::I64Load { memory: MemoryArg { offset: 0, align: 3, memory } }, &[l2_entry_addr], &[Type::I64]);
     
-    // Level 1: bits [31:16]
+    // L1
     let l1_idx = extract_16bit(f, block, vaddr, 16);
     let l1_offset = f.add_op(block, Operator::I64Shl, &[l1_idx, shift_3], &[Type::I64]);
     let l1_entry_addr = f.add_op(block, Operator::I64Add, &[l1_table_base, l1_offset], &[Type::I64]);
-    let phys_page = f.add_op(
-        block,
-        Operator::I64Load { memory: MemoryArg { offset: 0, align: 3, memory } },
-        &[l1_entry_addr],
-        &[Type::I64]
-    );
+    let page_pointer = f.add_op(block, Operator::I64Load { memory: MemoryArg { offset: 0, align: 3, memory } }, &[l1_entry_addr], &[Type::I64]);
+
+    // Security and final address construction
+    let shift_16 = f.add_op(block, Operator::I64Const { value: 16 }, &[], &[Type::I64]);
+    let sec_idx_mask = f.add_op(block, Operator::I64Const { value: 0xFFFF }, &[], &[Type::I64]);
+    let sec_idx = f.add_op(block, Operator::I64And, &[page_pointer, sec_idx_mask], &[Type::I64]);
+    let page_base_low48 = f.add_op(block, Operator::I64ShrU, &[page_pointer, shift_16], &[Type::I64]);
+    let sec_entry_offset = f.add_op(block, Operator::I64Shl, &[sec_idx, shift_3], &[Type::I64]);
+    let sec_entry_addr = f.add_op(block, Operator::I64Add, &[sec_dir_base_value, sec_entry_offset], &[Type::I64]);
+    let sec_entry = f.add_op(block, Operator::I64Load { memory: MemoryArg { offset: 0, align: 3, memory } }, &[sec_entry_addr], &[Type::I64]);
+    let shift_48 = f.add_op(block, Operator::I64Const { value: 48 }, &[], &[Type::I64]);
+    let page_base_top16 = f.add_op(block, Operator::I64ShrU, &[sec_entry, shift_48], &[Type::I64]);
+    let page_base_top = f.add_op(block, Operator::I64Shl, &[page_base_top16, shift_48], &[Type::I64]);
+    let phys_page_base = f.add_op(block, Operator::I64Or, &[page_base_top, page_base_low48], &[Type::I64]);
     
-    // Page offset: bits [15:0]
     let page_offset = extract_16bit(f, block, vaddr, 0);
-    
-    // Combine: phys_page + page_offset
-    f.add_op(block, Operator::I64Add, &[phys_page, page_offset], &[Type::I64])
+    f.add_op(block, Operator::I64Add, &[phys_page_base, page_offset], &[Type::I64])
 }
 
 /// Single-level page table mapper with 32-bit physical addresses
-///
-/// This variant uses 4-byte page table entries for 32-bit physical addresses,
-/// supporting up to 4 GiB of physical memory while maintaining 64-bit virtual addresses.
-///
-/// # Arguments
-/// - `module`: WebAssembly module
-/// - `f`: Function body being built
-/// - `block`: Current block
-/// - `vaddr`: Virtual address value (64-bit)
-/// - `page_table_base`: Base address of page table (constant, from Regs, or global)
-/// - `regs`: Register state (needed if page_table_base is FromRegs)
-/// - `memory`: Memory index to use for loads
-///
-/// # Returns
-/// Physical address value (64-bit, but value fits in 32 bits)
 pub fn standard_page_table_mapper_32(
     module: &mut Module,
     f: &mut FunctionBody,
     block: Block,
     vaddr: Value,
     page_table_base: impl Into<PageTableBase>,
+    security_directory_base: impl Into<PageTableBase>,
     regs: &Regs,
     memory: Memory,
 ) -> Value {
     let pt_base_value = page_table_base.into().to_value(f, block, regs);
-    // Extract page number: vaddr >> 16
+    let sec_dir_base_value = security_directory_base.into().to_value(f, block, regs);
+
+    // Get page pointer
     let shift_16 = f.add_op(block, Operator::I64Const { value: 16 }, &[], &[Type::I64]);
     let page_num = f.add_op(block, Operator::I64ShrU, &[vaddr, shift_16], &[Type::I64]);
-    
-    // Multiply page_num by 4 (size of u32 entry)
     let shift_2 = f.add_op(block, Operator::I64Const { value: 2 }, &[], &[Type::I64]);
     let entry_offset = f.add_op(block, Operator::I64Shl, &[page_num, shift_2], &[Type::I64]);
-    
-    // Add page table base address
     let entry_addr = f.add_op(block, Operator::I64Add, &[pt_base_value, entry_offset], &[Type::I64]);
-    
-    // Load 32-bit physical page base from page table and extend to 64-bit
-    let phys_page_32 = f.add_op(
-        block,
-        Operator::I32Load {
-            memory: MemoryArg {
-                offset: 0,
-                align: 2,
-                memory,
-            }
-        },
-        &[entry_addr],
-        &[Type::I32]
-    );
-    let phys_page = f.add_op(block, Operator::I64ExtendI32U, &[phys_page_32], &[Type::I64]);
-    
-    // Extract page offset: vaddr & 0xFFFF
-    let mask = f.add_op(block, Operator::I64Const { value: 0xFFFF }, &[], &[Type::I64]);
-    let page_offset = f.add_op(block, Operator::I64And, &[vaddr, mask], &[Type::I64]);
-    
-    // Combine: phys_page + page_offset
-    f.add_op(block, Operator::I64Add, &[phys_page, page_offset], &[Type::I64])
+    let page_pointer = f.add_op(block, Operator::I32Load { memory: MemoryArg { offset: 0, align: 2, memory } }, &[entry_addr], &[Type::I32]);
+    let page_pointer64 = f.add_op(block, Operator::I64ExtendI32U, &[page_pointer], &[Type::I64]);
+
+    // Get security index and lower 24 bits of page base
+    let sec_idx_mask = f.add_op(block, Operator::I64Const { value: 0xFF }, &[], &[Type::I64]);
+    let sec_idx = f.add_op(block, Operator::I64And, &[page_pointer64, sec_idx_mask], &[Type::I64]);
+    let shift_8 = f.add_op(block, Operator::I64Const { value: 8 }, &[], &[Type::I64]);
+    let page_base_low24 = f.add_op(block, Operator::I64ShrU, &[page_pointer64, shift_8], &[Type::I64]);
+
+    // Get security entry
+    let shift_3 = f.add_op(block, Operator::I64Const { value: 3 }, &[], &[Type::I64]);
+    let sec_entry_offset = f.add_op(block, Operator::I64Shl, &[sec_idx, shift_3], &[Type::I64]);
+    let sec_entry_addr = f.add_op(block, Operator::I64Add, &[sec_dir_base_value, sec_entry_offset], &[Type::I64]);
+    let sec_entry = f.add_op(block, Operator::I64Load { memory: MemoryArg { offset: 0, align: 3, memory } }, &[sec_entry_addr], &[Type::I64]);
+
+    // Construct final physical page base
+    let shift_56 = f.add_op(block, Operator::I64Const { value: 56 }, &[], &[Type::I64]);
+    let page_base_top8 = f.add_op(block, Operator::I64ShrU, &[sec_entry, shift_56], &[Type::I64]);
+    let shift_24 = f.add_op(block, Operator::I64Const { value: 24 }, &[], &[Type::I64]);
+    let page_base_top = f.add_op(block, Operator::I64Shl, &[page_base_top8, shift_24], &[Type::I64]);
+    let phys_page_base = f.add_op(block, Operator::I64Or, &[page_base_top, page_base_low24], &[Type::I64]);
+
+    // Combine with page offset
+    let page_offset_mask = f.add_op(block, Operator::I64Const { value: 0xFFFF }, &[], &[Type::I64]);
+    let page_offset = f.add_op(block, Operator::I64And, &[vaddr, page_offset_mask], &[Type::I64]);
+    f.add_op(block, Operator::I64Add, &[phys_page_base, page_offset], &[Type::I64])
 }
 
 /// Multi-level page table mapper with 32-bit physical addresses
-///
-/// This variant uses 4-byte page table entries for 32-bit physical addresses,
-/// supporting up to 4 GiB of physical memory in a 3-level page table structure.
-///
-/// # Arguments
-/// - `module`: WebAssembly module
-/// - `f`: Function body being built
-/// - `block`: Current block
-/// - `vaddr`: Virtual address value (64-bit)
-/// - `l3_table_base`: Base address of level 3 page table (constant, from Regs, or global)
-/// - `regs`: Register state (needed if l3_table_base is FromRegs)
-/// - `memory`: Memory index to use for loads
-///
-/// # Returns
-/// Physical address value (64-bit, but value fits in 32 bits)
 pub fn multilevel_page_table_mapper_32(
     module: &mut Module,
     f: &mut FunctionBody,
     block: Block,
     vaddr: Value,
     l3_table_base: impl Into<PageTableBase>,
+    security_directory_base: impl Into<PageTableBase>,
     regs: &Regs,
     memory: Memory,
 ) -> Value {
     let l3_base_value = l3_table_base.into().to_value(f, block, regs);
-    // Helper to extract a 16-bit field from vaddr
+    let sec_dir_base_value = security_directory_base.into().to_value(f, block, regs);
+
     let extract_16bit = |f: &mut FunctionBody, block, val: Value, shift_amt: u64| -> Value {
         let shift = f.add_op(block, Operator::I64Const { value: shift_amt }, &[], &[Type::I64]);
         let shifted = f.add_op(block, Operator::I64ShrU, &[val, shift], &[Type::I64]);
@@ -1838,42 +1776,49 @@ pub fn multilevel_page_table_mapper_32(
         f.add_op(block, Operator::I64And, &[shifted, mask], &[Type::I64])
     };
     
-    // Helper to load u32 and extend to u64
     let load_u32_extend = |f: &mut FunctionBody, block, addr: Value| -> Value {
-        let val_32 = f.add_op(
-            block,
-            Operator::I32Load { memory: MemoryArg { offset: 0, align: 2, memory } },
-            &[addr],
-            &[Type::I32]
-        );
+        let val_32 = f.add_op(block, Operator::I32Load { memory: MemoryArg { offset: 0, align: 2, memory } }, &[addr], &[Type::I32]);
         f.add_op(block, Operator::I64ExtendI32U, &[val_32], &[Type::I64])
     };
     
     let shift_2 = f.add_op(block, Operator::I64Const { value: 2 }, &[], &[Type::I64]);
-    
-    // Level 3: bits [63:48]
+
+    // L3
     let l3_idx = extract_16bit(f, block, vaddr, 48);
     let l3_offset = f.add_op(block, Operator::I64Shl, &[l3_idx, shift_2], &[Type::I64]);
     let l3_entry_addr = f.add_op(block, Operator::I64Add, &[l3_base_value, l3_offset], &[Type::I64]);
     let l2_table_base = load_u32_extend(f, block, l3_entry_addr);
-    
-    // Level 2: bits [47:32]
+
+    // L2
     let l2_idx = extract_16bit(f, block, vaddr, 32);
     let l2_offset = f.add_op(block, Operator::I64Shl, &[l2_idx, shift_2], &[Type::I64]);
     let l2_entry_addr = f.add_op(block, Operator::I64Add, &[l2_table_base, l2_offset], &[Type::I64]);
     let l1_table_base = load_u32_extend(f, block, l2_entry_addr);
-    
-    // Level 1: bits [31:16]
+
+    // L1
     let l1_idx = extract_16bit(f, block, vaddr, 16);
     let l1_offset = f.add_op(block, Operator::I64Shl, &[l1_idx, shift_2], &[Type::I64]);
     let l1_entry_addr = f.add_op(block, Operator::I64Add, &[l1_table_base, l1_offset], &[Type::I64]);
-    let phys_page = load_u32_extend(f, block, l1_entry_addr);
-    
-    // Page offset: bits [15:0]
+    let page_pointer = f.add_op(block, Operator::I32Load { memory: MemoryArg { offset: 0, align: 2, memory } }, &[l1_entry_addr], &[Type::I32]);
+    let page_pointer64 = f.add_op(block, Operator::I64ExtendI32U, &[page_pointer], &[Type::I64]);
+
+    // Security and final address construction
+    let sec_idx_mask = f.add_op(block, Operator::I64Const { value: 0xFF }, &[], &[Type::I64]);
+    let sec_idx = f.add_op(block, Operator::I64And, &[page_pointer64, sec_idx_mask], &[Type::I64]);
+    let shift_8 = f.add_op(block, Operator::I64Const { value: 8 }, &[], &[Type::I64]);
+    let page_base_low24 = f.add_op(block, Operator::I64ShrU, &[page_pointer64, shift_8], &[Type::I64]);
+    let shift_3 = f.add_op(block, Operator::I64Const { value: 3 }, &[], &[Type::I64]);
+    let sec_entry_offset = f.add_op(block, Operator::I64Shl, &[sec_idx, shift_3], &[Type::I64]);
+    let sec_entry_addr = f.add_op(block, Operator::I64Add, &[sec_dir_base_value, sec_entry_offset], &[Type::I64]);
+    let sec_entry = f.add_op(block, Operator::I64Load { memory: MemoryArg { offset: 0, align: 3, memory } }, &[sec_entry_addr], &[Type::I64]);
+    let shift_56 = f.add_op(block, Operator::I64Const { value: 56 }, &[], &[Type::I64]);
+    let page_base_top8 = f.add_op(block, Operator::I64ShrU, &[sec_entry, shift_56], &[Type::I64]);
+    let shift_24 = f.add_op(block, Operator::I64Const { value: 24 }, &[], &[Type::I64]);
+    let page_base_top = f.add_op(block, Operator::I64Shl, &[page_base_top8, shift_24], &[Type::I64]);
+    let phys_page_base = f.add_op(block, Operator::I64Or, &[page_base_top, page_base_low24], &[Type::I64]);
+
     let page_offset = extract_16bit(f, block, vaddr, 0);
-    
-    // Combine: phys_page + page_offset
-    f.add_op(block, Operator::I64Add, &[phys_page, page_offset], &[Type::I64])
+    f.add_op(block, Operator::I64Add, &[phys_page_base, page_offset], &[Type::I64])
 }
 
 #[derive(Clone, Copy)]
@@ -1939,12 +1884,8 @@ fn compile_internal(
 ) -> Func {
     let n = tune.n;
     let _bleed = tune.bleed;
-    // Base signature: user types + 31 GPRs (x1-x31) + 32 FPRs (f0-f31)
-    // GPRs are I64, FPRs are F64 to support double-precision (D extension)
-    // 
-    // RISC-V Specification Quote:
-    // "The D extension widens the 32 floating-point registers, f0–f31, to 64 bits."
-    let base = user.iter().cloned().chain([Type::I64; 31]).chain([Type::F64; 32]);
+    // Base signature: user types + 31 GPRs (x1-x31) + 32 FPRs (f0-f31) + page_table_base + security_directory_base
+    let base = user.iter().cloned().chain([Type::I64; 31]).chain([Type::F64; 32]).chain([Type::I64; 2]);
     let mut code_fns: Vec<Func> = vec![];
     let j_sig = new_sig(
         m,
