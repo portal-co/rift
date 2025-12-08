@@ -21,21 +21,31 @@ Uses `Opts.mapper` callback to inject custom address translation into compiled W
 let phys_addr = standard_page_table_mapper(
     module, function, block, vaddr,
     0x1000000u64,  // static constant
+    &regs,
     memory
 );
 
-// With runtime Value (from param, local, or global)
-let pt_base_value = ...; // Value from function parameter or local
+// With value from Regs.page_table_base field
 let phys_addr = standard_page_table_mapper(
     module, function, block, vaddr,
-    pt_base_value,  // runtime value
+    PageTableBase::FromRegs,
+    &regs,
+    memory
+);
+
+// With WebAssembly global variable
+let phys_addr = standard_page_table_mapper(
+    module, function, block, vaddr,
+    global_index,  // Global
+    &regs,
     memory
 );
 
 // 32-bit physical addresses (4 GiB limit)
 let phys_addr = standard_page_table_mapper_32(
     module, function, block, vaddr,
-    pt_base_value,  // can be Value or u64
+    PageTableBase::FromRegs,
+    &regs,
     memory
 );
 ```

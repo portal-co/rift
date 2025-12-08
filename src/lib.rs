@@ -204,6 +204,8 @@ pub struct Regs {
     /// For single-precision values, the upper 32 bits are NaN-boxed as per the spec.
     pub fpr: [Value; 32],
     pub user: Vec<Value>,
+    /// Page table base address (used for memory address translation)
+    pub page_table_base: Option<Value>,
 }
 impl Regs {
     pub fn from_args<T>(
@@ -220,10 +222,15 @@ impl Regs {
                 let mut args: &mut &mut _ = &mut args;
                 args.next_array()?
             },
+            page_table_base: args.next(),
         })
     }
     pub fn to_args(&self) -> impl Iterator<Item = Value> {
-        return self.user.iter().chain(self.gpr.iter()).chain(self.fpr.iter()).cloned();
+        return self.user.iter()
+            .chain(self.gpr.iter())
+            .chain(self.fpr.iter())
+            .chain(self.page_table_base.iter())
+            .cloned();
     }
     pub fn get(&self, f: &mut FunctionBody, block: Block, Reg(mut i): Reg) -> Value {
         i = i % 32;
@@ -1551,18 +1558,14 @@ fn compile_one(
     // fallthrough!()
 }
 
-/// Helper type for page table base address that can be either a runtime Value or a static constant
+/// Helper type for page table base address
 pub enum PageTableBase {
-    /// Runtime value (e.g., from a local, param, or global)
-    Runtime(Value),
     /// Static constant address
     Constant(u64),
-}
-
-impl From<Value> for PageTableBase {
-    fn from(v: Value) -> Self {
-        PageTableBase::Runtime(v)
-    }
+    /// Load from Regs.page_table_base field
+    FromRegs,
+    /// Runtime value from a WebAssembly global variable
+    Global(portal_pc_waffle::Global),
 }
 
 impl From<u64> for PageTableBase {
@@ -1571,11 +1574,25 @@ impl From<u64> for PageTableBase {
     }
 }
 
+impl From<portal_pc_waffle::Global> for PageTableBase {
+    fn from(g: portal_pc_waffle::Global) -> Self {
+        PageTableBase::Global(g)
+    }
+}
+
 impl PageTableBase {
-    fn to_value(self, f: &mut FunctionBody, block: Block) -> Value {
+    /// Get the page table base as a WebAssembly Value
+    fn to_value(self, f: &mut FunctionBody, block: Block, regs: &Regs) -> Value {
         match self {
-            PageTableBase::Runtime(v) => v,
-            PageTableBase::Constant(c) => f.add_op(block, Operator::I64Const { value: c }, &[], &[Type::I64]),
+            PageTableBase::Constant(addr) => {
+                f.add_op(block, Operator::I64Const { value: addr }, &[], &[Type::I64])
+            }
+            PageTableBase::FromRegs => {
+                regs.page_table_base.expect("page_table_base not set in Regs")
+            }
+            PageTableBase::Global(global_idx) => {
+                f.add_op(block, Operator::GlobalGet { global_index: global_idx }, &[], &[Type::I64])
+            }
         }
     }
 }
@@ -1596,7 +1613,8 @@ impl PageTableBase {
 /// - `f`: Function body being built
 /// - `block`: Current block
 /// - `vaddr`: Virtual address value
-/// - `page_table_base`: Base address of page table (runtime Value or static u64)
+/// - `page_table_base`: Base address of page table (constant, from Regs, or global)
+/// - `regs`: Register state (needed if page_table_base is FromRegs)
 /// - `memory`: Memory index to use for loads
 ///
 /// # Returns
@@ -1607,9 +1625,10 @@ pub fn standard_page_table_mapper(
     block: Block,
     vaddr: Value,
     page_table_base: impl Into<PageTableBase>,
+    regs: &Regs,
     memory: Memory,
 ) -> Value {
-    let pt_base_value = page_table_base.into().to_value(f, block);
+    let pt_base_value = page_table_base.into().to_value(f, block, regs);
     
     // Extract page number: vaddr >> 16
     let shift_16 = f.add_op(block, Operator::I64Const { value: 16 }, &[], &[Type::I64]);
@@ -1660,7 +1679,8 @@ pub fn standard_page_table_mapper(
 /// - `f`: Function body being built
 /// - `block`: Current block
 /// - `vaddr`: Virtual address value
-/// - `l3_table_base`: Base address of level 3 page table (runtime Value or static u64)
+/// - `l3_table_base`: Base address of level 3 page table (constant, from Regs, or global)
+/// - `regs`: Register state (needed if l3_table_base is FromRegs)
 /// - `memory`: Memory index to use for loads
 ///
 /// # Returns
@@ -1671,9 +1691,10 @@ pub fn multilevel_page_table_mapper(
     block: Block,
     vaddr: Value,
     l3_table_base: impl Into<PageTableBase>,
+    regs: &Regs,
     memory: Memory,
 ) -> Value {
-    let l3_base_value = l3_table_base.into().to_value(f, block);
+    let l3_base_value = l3_table_base.into().to_value(f, block, regs);
     // Helper to extract a 16-bit field from vaddr
     let extract_16bit = |f: &mut FunctionBody, block, val: Value, shift_amt: u64| -> Value {
         let shift = f.add_op(block, Operator::I64Const { value: shift_amt }, &[], &[Type::I64]);
@@ -1733,7 +1754,8 @@ pub fn multilevel_page_table_mapper(
 /// - `f`: Function body being built
 /// - `block`: Current block
 /// - `vaddr`: Virtual address value (64-bit)
-/// - `page_table_base`: Base address of page table (runtime Value or static u64)
+/// - `page_table_base`: Base address of page table (constant, from Regs, or global)
+/// - `regs`: Register state (needed if page_table_base is FromRegs)
 /// - `memory`: Memory index to use for loads
 ///
 /// # Returns
@@ -1744,9 +1766,10 @@ pub fn standard_page_table_mapper_32(
     block: Block,
     vaddr: Value,
     page_table_base: impl Into<PageTableBase>,
+    regs: &Regs,
     memory: Memory,
 ) -> Value {
-    let pt_base_value = page_table_base.into().to_value(f, block);
+    let pt_base_value = page_table_base.into().to_value(f, block, regs);
     // Extract page number: vaddr >> 16
     let shift_16 = f.add_op(block, Operator::I64Const { value: 16 }, &[], &[Type::I64]);
     let page_num = f.add_op(block, Operator::I64ShrU, &[vaddr, shift_16], &[Type::I64]);
@@ -1791,7 +1814,8 @@ pub fn standard_page_table_mapper_32(
 /// - `f`: Function body being built
 /// - `block`: Current block
 /// - `vaddr`: Virtual address value (64-bit)
-/// - `l3_table_base`: Base address of level 3 page table (runtime Value or static u64)
+/// - `l3_table_base`: Base address of level 3 page table (constant, from Regs, or global)
+/// - `regs`: Register state (needed if l3_table_base is FromRegs)
 /// - `memory`: Memory index to use for loads
 ///
 /// # Returns
@@ -1802,9 +1826,10 @@ pub fn multilevel_page_table_mapper_32(
     block: Block,
     vaddr: Value,
     l3_table_base: impl Into<PageTableBase>,
+    regs: &Regs,
     memory: Memory,
 ) -> Value {
-    let l3_base_value = l3_table_base.into().to_value(f, block);
+    let l3_base_value = l3_table_base.into().to_value(f, block, regs);
     // Helper to extract a 16-bit field from vaddr
     let extract_16bit = |f: &mut FunctionBody, block, val: Value, shift_amt: u64| -> Value {
         let shift = f.add_op(block, Operator::I64Const { value: shift_amt }, &[], &[Type::I64]);
@@ -2046,6 +2071,7 @@ fn compile_internal(
                 user: user.iter().filter_map(|_x| args_iter.next()).collect(),
                 gpr: args_iter.next_array().unwrap(),
                 fpr: args_iter.next_array().unwrap(),
+                page_table_base: args_iter.next(),
             };
             
             // Check for HINT instruction and invoke handler if provided
@@ -2131,6 +2157,7 @@ fn compile_internal(
             user: user.iter().filter_map(|_x| args.next()).collect(),
             gpr: args.next_array().unwrap(),
             fpr: args.next_array().unwrap(),
+            page_table_base: args.next(),
         };
         let mut rpc = jt;
         user_prepa(&mut uregs, &mut rpc);
