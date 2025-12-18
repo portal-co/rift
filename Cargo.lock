@@ -370,8 +370,30 @@ dependencies = [
 
 [[package]]
 name = "portal-pc-waffle"
-version = "0.5.5"
-source = "git+https://github.com/portal-co/waffle-.git?branch=portal#0f4ee85794bf3c45eb845d73c4e2dfdc935eebca"
+version = "0.6.0-alpha.1"
+source = "git+https://github.com/portal-co/waffle-.git?branch=portal#3c5918912829e7f9d6e3688df66d5b31a9dd6490"
+dependencies = [
+ "log",
+ "portal-pc-waffle-entity",
+ "portal-pc-waffle-ir",
+ "portal-pc-waffle-passes",
+ "wasm-encoder",
+ "wasmparser",
+]
+
+[[package]]
+name = "portal-pc-waffle-entity"
+version = "0.6.0-alpha.1"
+source = "git+https://github.com/portal-co/waffle-.git?branch=portal#3c5918912829e7f9d6e3688df66d5b31a9dd6490"
+dependencies = [
+ "arena-traits",
+ "serde",
+]
+
+[[package]]
+name = "portal-pc-waffle-ir"
+version = "0.6.0-alpha.1"
+source = "git+https://github.com/portal-co/waffle-.git?branch=portal#3c5918912829e7f9d6e3688df66d5b31a9dd6490"
 dependencies = [
  "anyhow",
  "arena-traits",
@@ -382,11 +404,40 @@ dependencies = [
  "lending-iterator",
  "log",
  "paste",
+ "portal-pc-waffle-entity",
  "serde",
  "sha3",
  "smallvec",
  "wasm-encoder",
  "wasmparser",
+]
+
+[[package]]
+name = "portal-pc-waffle-passes"
+version = "0.6.0-alpha.1"
+source = "git+https://github.com/portal-co/waffle-.git?branch=portal#3c5918912829e7f9d6e3688df66d5b31a9dd6490"
+dependencies = [
+ "anyhow",
+ "hashbrown",
+ "log",
+ "portal-pc-waffle-entity",
+ "portal-pc-waffle-ir",
+ "portal-pc-waffle-passes-shared",
+ "sha3",
+ "smallvec",
+]
+
+[[package]]
+name = "portal-pc-waffle-passes-shared"
+version = "0.6.0-alpha.1"
+source = "git+https://github.com/portal-co/waffle-.git?branch=portal#3c5918912829e7f9d6e3688df66d5b31a9dd6490"
+dependencies = [
+ "anyhow",
+ "hashbrown",
+ "log",
+ "portal-pc-waffle-entity",
+ "portal-pc-waffle-ir",
+ "smallvec",
 ]
 
 [[package]]
@@ -521,18 +572,18 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "wasm-encoder"
-version = "0.227.1"
+version = "0.241.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80bb72f02e7fbf07183443b27b0f3d4144abf8c114189f2e088ed95b696a7822"
+checksum = "e01164c9dda68301e34fdae536c23ed6fe90ce6d97213ccc171eebbd3d02d6b8"
 dependencies = [
  "leb128fmt",
 ]
 
 [[package]]
 name = "wasmparser"
-version = "0.227.1"
+version = "0.241.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f51cad774fb3c9461ab9bccc9c62dfb7388397b5deda31bf40e8108ccd678b2"
+checksum = "46d90019b1afd4b808c263e428de644f3003691f243387d30d673211ee0cb8e8"
 dependencies = [
  "bitflags",
 ]
