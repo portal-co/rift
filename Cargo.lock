@@ -118,7 +118,7 @@ dependencies = [
  "itertools",
  "proc-macro2",
  "quote",
- "syn 2.0.111",
+ "syn 2.0.113",
 ]
 
 [[package]]
@@ -198,7 +198,7 @@ checksum = "a0eb5a3343abf848c0984fe4604b2b105da9539376e24fc0a3b0007411ae4fd9"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.111",
+ "syn 2.0.113",
 ]
 
 [[package]]
@@ -262,9 +262,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.178"
+version = "0.2.179"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37c93d8daa9d8a012fd8ab92f088405fb202ea0b6ab73ee2482ae66af4f42091"
+checksum = "c5a2d376baa530d1238d133232d15e239abad80d05838b4b59354e5268af431f"
 
 [[package]]
 name = "log"
@@ -376,7 +376,7 @@ dependencies = [
 [[package]]
 name = "portal-pc-waffle"
 version = "0.6.0-alpha.1"
-source = "git+https://github.com/portal-co/waffle-.git?branch=portal#fe8f60cf41b32b06943b35dbb0ee1d8e1592ce7e"
+source = "git+https://github.com/portal-co/waffle-.git?branch=portal#4c39da0dfb3751d97c4cef55a9b1eda69aa6ec5d"
 dependencies = [
  "log",
  "portal-pc-waffle-entity",
@@ -389,7 +389,7 @@ dependencies = [
 [[package]]
 name = "portal-pc-waffle-entity"
 version = "0.6.0-alpha.1"
-source = "git+https://github.com/portal-co/waffle-.git?branch=portal#fe8f60cf41b32b06943b35dbb0ee1d8e1592ce7e"
+source = "git+https://github.com/portal-co/waffle-.git?branch=portal#4c39da0dfb3751d97c4cef55a9b1eda69aa6ec5d"
 dependencies = [
  "arena-traits",
  "serde",
@@ -398,7 +398,7 @@ dependencies = [
 [[package]]
 name = "portal-pc-waffle-ir"
 version = "0.6.0-alpha.1"
-source = "git+https://github.com/portal-co/waffle-.git?branch=portal#fe8f60cf41b32b06943b35dbb0ee1d8e1592ce7e"
+source = "git+https://github.com/portal-co/waffle-.git?branch=portal#4c39da0dfb3751d97c4cef55a9b1eda69aa6ec5d"
 dependencies = [
  "anyhow",
  "arena-traits",
@@ -420,7 +420,7 @@ dependencies = [
 [[package]]
 name = "portal-pc-waffle-passes"
 version = "0.6.0-alpha.1"
-source = "git+https://github.com/portal-co/waffle-.git?branch=portal#fe8f60cf41b32b06943b35dbb0ee1d8e1592ce7e"
+source = "git+https://github.com/portal-co/waffle-.git?branch=portal#4c39da0dfb3751d97c4cef55a9b1eda69aa6ec5d"
 dependencies = [
  "anyhow",
  "hashbrown 0.15.5",
@@ -435,7 +435,7 @@ dependencies = [
 [[package]]
 name = "portal-pc-waffle-passes-shared"
 version = "0.6.0-alpha.1"
-source = "git+https://github.com/portal-co/waffle-.git?branch=portal#fe8f60cf41b32b06943b35dbb0ee1d8e1592ce7e"
+source = "git+https://github.com/portal-co/waffle-.git?branch=portal#4c39da0dfb3751d97c4cef55a9b1eda69aa6ec5d"
 dependencies = [
  "anyhow",
  "hashbrown 0.15.5",
@@ -447,9 +447,9 @@ dependencies = [
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.103"
+version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ee95bc4ef87b8d5ba32e8b7714ccc834865276eab0aed5c9958d00ec45f49e8"
+checksum = "9695f8df41bb4f3d222c95a67532365f569318332d03d5f3f67f37b20e6ebdf0"
 dependencies = [
  "unicode-ident",
 ]
@@ -491,7 +491,7 @@ checksum = "f9d441c3b2ebf55cebf796bfdc265d67fa09db17b7bb6bd4be75c509e1e8fec3"
 [[package]]
 name = "rv-asm"
 version = "0.2.1"
-source = "git+https://github.com/portal-co/rv-utils.git?branch=main#0abcbcf5c7dfe5330fe007667346822d4159dcf3"
+source = "git+https://github.com/portal-co/rv-utils.git?branch=main#7ef1c1cac19d4773230dc298b2561204374884f1"
 
 [[package]]
 name = "serde"
@@ -520,7 +520,7 @@ checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.111",
+ "syn 2.0.113",
 ]
 
 [[package]]
@@ -552,9 +552,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "2.0.111"
+version = "2.0.113"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "390cc9a294ab71bdb1aa2e99d13be9c753cd2d7bd6560c77118597410c4d2e87"
+checksum = "678faa00651c9eb72dd2020cbdf275d92eccb2400d568e419efdd64838145cb4"
 dependencies = [
  "proc-macro2",
  "quote",
