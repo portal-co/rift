@@ -1,13 +1,14 @@
 # rift
 
 ## Description
-Project rift
+"Fast SSA-based RISC-V lifter". Converts RISC-V machine code to an SSA-based intermediate representation (using `portal-pc-waffle`?).
 
 ## Goals
-- [ ] Add project goals
+- [ ] Lift RISC-V to SSA IR
+- [ ] Optimize for speed/analysis
 
 ## Progress
-- [ ] Initial setup
+- [ ] Crate setup with asm and waffle dependencies
 
 ---
 *AI assisted*
