@@ -491,7 +491,7 @@ checksum = "f9d441c3b2ebf55cebf796bfdc265d67fa09db17b7bb6bd4be75c509e1e8fec3"
 [[package]]
 name = "rv-asm"
 version = "0.2.1"
-source = "git+https://github.com/portal-co/rv-utils.git?branch=main#077f6fa1aa46f7f1f1e1c207b16da5faadef0a57"
+source = "git+https://github.com/portal-co/rv-utils.git?branch=main#db51c88daba52a7dd2cfd1abf72423d2fe369c0d"
 
 [[package]]
 name = "serde"
