@@ -456,9 +456,9 @@ dependencies = [
 
 [[package]]
 name = "quote"
-version = "1.0.44"
+version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21b2ebcf727b7760c461f091f9f0f539b77b8e87f2fd88131e7f1b433b3cece4"
+checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
 dependencies = [
  "proc-macro2",
 ]
@@ -491,7 +491,7 @@ checksum = "f9d441c3b2ebf55cebf796bfdc265d67fa09db17b7bb6bd4be75c509e1e8fec3"
 [[package]]
 name = "rv-asm"
 version = "0.2.1"
-source = "git+https://github.com/portal-co/rv-utils.git?branch=main#70aae402fd7c34cf6d92a912ee2e1f4011b1075a"
+source = "git+https://github.com/portal-co/rv-utils.git?branch=main#f258508da2d13fc47b7a0646043da5f750a2424a"
 
 [[package]]
 name = "serde"
